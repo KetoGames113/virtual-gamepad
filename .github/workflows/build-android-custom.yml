@@ -1,0 +1,75 @@
+name: Build Android APK (custom / fork)
+
+# Builds the Android app WITHOUT needing the maintainer's signing secrets,
+# so it works on any fork. Runs automatically when android-app/ changes,
+# or manually from the Actions tab (Run workflow).
+on:
+  push:
+    branches: [main]
+    paths: ['android-app/**', '.github/workflows/build-android-custom.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android-app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Scaffold native android/ project
+        run: flutter create --platforms=android --org in.atomprod .
+
+      - name: Apply our AndroidManifest (permissions + orientation)
+        run: cp manifest-overrides/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+
+      - name: Use a separate app id so it installs next to the official app
+        shell: bash
+        run: |
+          set -e
+          if [ -f android/app/build.gradle.kts ]; then
+            sed -i -E 's/(applicationId\s*=\s*)"[^"]*"/\1"in.atomprod.vgamepad.custom"/' android/app/build.gradle.kts
+            grep -n "applicationId" android/app/build.gradle.kts
+          elif [ -f android/app/build.gradle ]; then
+            sed -i -E 's/(applicationId\s+)"[^"]*"/\1"in.atomprod.vgamepad.custom"/' android/app/build.gradle
+            grep -n "applicationId" android/app/build.gradle
+          else
+            echo "build.gradle(.kts) not found" >&2; exit 1
+          fi
+
+      - name: Get packages
+        run: flutter pub get
+
+      - name: Generate App Icons
+        run: dart run flutter_launcher_icons
+
+      # No keystore configured => Flutter signs the release APK with the
+      # debug key. That is fine for installing on your own phone.
+      - name: Build release APK
+        run: flutter build apk --release --build-number=${{ github.run_number }}
+
+      - name: Rename APK
+        run: mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/VirtualGamepad-custom.apk
+
+      - name: Upload APK as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VirtualGamepad-custom-apk
+          path: android-app/build/app/outputs/flutter-apk/VirtualGamepad-custom.apk
+
+      - name: Publish APK to a GitHub Release (easy download on phone)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create custom-latest --target "$GITHUB_SHA" \
+            --title "Custom build (latest)" \
+            --notes "Auto-built from the latest commit. Debug-signed." || true
+          gh release upload custom-latest build/app/outputs/flutter-apk/VirtualGamepad-custom.apk --clobber

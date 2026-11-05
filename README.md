@@ -159,3 +159,9 @@ Created with ❤️ by [kaifcoding](https://github.com/kaifcoding) · © 2026 At
 ## 📄 License
 
 [MIT](LICENSE) — free for anyone to use, modify, and redistribute, including commercially.
+## New in this build
+
+- **Per-stick sensitivity & deadzone** — edit layout → tap a stick (sensitivity 20%–300%).
+- **Tilt steering** — edit layout → (tap empty space) → *Tilt steering* tab. Phone held like a wheel in landscape; drives left/right stick X. Sensitivity, deadzone, smoothing, invert, *Set center*; a small calibrate button appears next to the edit button during play.
+- **A / B / X / Y are separate controls** — move, resize, recolour or hide each one independently. Old layouts are migrated automatically.
+- **Trigger lock** — tap LT/RT in the editor → *Double-tap to lock*. Double-tap = held fully pressed; touch again to release.

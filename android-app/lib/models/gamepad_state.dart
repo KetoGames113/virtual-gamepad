@@ -12,6 +12,12 @@ class GamepadState {
   double lx = 0, ly = 0, rx = 0, ry = 0;
   double lt = 0, rt = 0;
 
+  /// Tilt-steering overrides for the stick X axes (null = use touch stick).
+  double? tiltLx, tiltRx;
+
+  /// Right-stick override while a trigger is being slid (steer-with-trigger).
+  double? trigRx, trigRy;
+
   GamepadState(this.socket);
 
   void start() {
@@ -19,10 +25,10 @@ class GamepadState {
     _ticker = Timer.periodic(const Duration(milliseconds: 16), (_) {
       socket.sendInput(
         buttons: _buttons,
-        lx: lx,
+        lx: tiltLx ?? lx,
         ly: ly,
-        rx: rx,
-        ry: ry,
+        rx: trigRx ?? tiltRx ?? rx,
+        ry: trigRy ?? ry,
         lt: lt,
         rt: rt,
       );
@@ -40,6 +46,8 @@ class GamepadState {
     _buttons = 0;
     lx = ly = rx = ry = 0;
     lt = rt = 0;
+    tiltLx = tiltRx = null;
+    trigRx = trigRy = null;
   }
 
   void setButton(int bit, bool pressed) {

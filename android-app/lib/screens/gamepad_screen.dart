@@ -2,6 +2,7 @@ import 'dart:async'; // Added to handle stream subscriptions
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:sensors_plus/sensors_plus.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/gamepad_state.dart';
@@ -54,6 +55,15 @@ class _GamepadScreenState extends State<GamepadScreen> {
   Offset? _dragRaw; // finger-accurate centre while dragging
   static const double _grid = 20;
   String? _selected;
+  int _panelTab = 0; // 0 = general, 1 = tilt
+
+  // Tilt steering
+  StreamSubscription<AccelerometerEvent>? _accelSub;
+  final ValueNotifier<double> _tiltPreview = ValueNotifier(0);
+  double _fx = 0, _fy = 0; // smoothed accelerometer x / y
+  bool _fInit = false;
+  double _orient = 1; // +1 / -1: landscape-left vs landscape-right
+  double _tiltAngle = 0; // current wheel angle in degrees (+ = clockwise)
 
   @override
   void initState() {
@@ -65,6 +75,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
     } else {
       _state.start();
     }
+    _layout.addListener(_syncTilt);
     _layout.load();
     WakelockPlus.enable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
@@ -84,8 +95,11 @@ class _GamepadScreenState extends State<GamepadScreen> {
   @override
   void dispose() {
     _connectionSubscription?.cancel(); // Cancel network listeners to prevent memory leaks
+    _accelSub?.cancel();
+    _tiltPreview.dispose();
     _state.stop();
     _layout.save();
+    _layout.removeListener(_syncTilt);
     _layout.dispose();
     _ownSocket?.dispose();
     WakelockPlus.disable();
@@ -121,6 +135,104 @@ class _GamepadScreenState extends State<GamepadScreen> {
   }
 
   Color _colorOr(String id, Color fallback) => _colorOf(id) ?? fallback;
+
+  /// Releases everything held on the PC and resets local haptic trackers.
+  void _releaseAll() {
+    _state.releaseAll();
+    _leftTriggerStep = _rightTriggerStep = 0;
+    _leftStickActive = _rightStickActive = false;
+  }
+
+  // ───────────────────────── Tilt steering ─────────────────────────
+
+  void _syncTilt() {
+    final want = _layout.settings.tilt;
+    if (want && _accelSub == null) {
+      _fInit = false;
+      try {
+        _accelSub = accelerometerEventStream(samplingPeriod: SensorInterval.gameInterval)
+            .listen(_onAccel, onError: (_) {
+          _accelSub?.cancel();
+          _accelSub = null;
+          _toast('Tilt sensor not available on this device');
+        });
+      } catch (_) {
+        _accelSub = null;
+        _toast('Tilt sensor not available on this device');
+      }
+    } else if (!want && _accelSub != null) {
+      _accelSub!.cancel();
+      _accelSub = null;
+      _tiltPreview.value = 0;
+      _state.tiltLx = _state.tiltRx = null;
+    }
+  }
+
+  /// Phone held in landscape like a steering wheel: turning it clockwise
+  /// shifts gravity between the device's x and y axes.
+  void _onAccel(AccelerometerEvent e) {
+    final st = _layout.settings;
+    if (!_fInit) {
+      _fx = e.x;
+      _fy = e.y;
+      _fInit = true;
+    } else {
+      final k = 1.0 - st.tiltSmooth;
+      _fx += (e.x - _fx) * k;
+      _fy += (e.y - _fy) * k;
+    }
+
+    double steer = 0;
+    // If the phone lies flat there is no wheel angle to read.
+    if (math.sqrt(_fx * _fx + _fy * _fy) > 3.0) {
+      if (_fx.abs() > 4.0) _orient = _fx >= 0 ? 1.0 : -1.0; // landscape L/R
+      final deg = math.atan2(_fy * _orient, _fx * _orient) * 180 / math.pi;
+      _tiltAngle = deg;
+
+      var d = deg - st.tiltCenter;
+      if (d > 180) d -= 360;
+      if (d < -180) d += 360;
+      if (st.tiltInvert) d = -d;
+
+      final dz = st.tiltDeadzone;
+      var full = 45.0 / st.tiltSens; // degrees for full lock
+      if (full < dz + 1) full = dz + 1;
+      final m = d.abs();
+      if (m > dz) {
+        steer = ((m - dz) / (full - dz)).clamp(0.0, 1.0).toDouble() * (d < 0 ? -1.0 : 1.0);
+      }
+    }
+
+    _tiltPreview.value = steer;
+    if (_editing || widget.editorOnly) {
+      _state.tiltLx = _state.tiltRx = null;
+      return;
+    }
+    if (st.tiltRightStick) {
+      _state.tiltLx = null;
+      _state.tiltRx = steer;
+    } else {
+      _state.tiltRx = null;
+      _state.tiltLx = steer;
+    }
+  }
+
+  /// A trigger being slid: drives the right stick (with its sensitivity).
+  void _handleTriggerSteer(double x, double y, bool active) {
+    if (!active) {
+      _state.trigRx = _state.trigRy = null;
+      return;
+    }
+    final v = _shape(x, y, left: false);
+    _state.trigRx = v[0];
+    _state.trigRy = v[1];
+  }
+
+  void _calibrateTilt() {
+    _layout.tweak((s) => s.tiltCenter = _tiltAngle);
+    _layout.save();
+    HapticFeedback.selectionClick();
+  }
 
   /// Light vibration, unless the active profile turned vibration off.
   void _buzz() {
@@ -209,7 +321,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
 
   void _enterEdit() {
     HapticFeedback.selectionClick();
-    _state.releaseAll(); // nothing stays "held" on the PC while editing
+    _releaseAll(); // nothing stays "held" on the PC while editing
     setState(() {
       _editing = true;
       _selected = null;
@@ -330,13 +442,14 @@ class _GamepadScreenState extends State<GamepadScreen> {
     );
   }
 
-  /// Applies the profile's deadzone + sensitivity to a raw stick vector.
-  List<double> _shape(double x, double y) {
+  /// Applies that stick's deadzone + sensitivity to a raw stick vector.
+  List<double> _shape(double x, double y, {required bool left}) {
     final s = _layout.settings;
+    final dz = left ? s.deadzoneL : s.deadzoneR;
+    final gain = left ? s.sensL : s.sensR;
     final m = math.sqrt(x * x + y * y);
-    if (m <= s.deadzone || m == 0) return const [0.0, 0.0];
-    final scaled =
-        (((m - s.deadzone) / (1 - s.deadzone)) * s.sensitivity).clamp(0.0, 1.0).toDouble();
+    if (m <= dz || m == 0) return const [0.0, 0.0];
+    final scaled = (((m - dz) / (1 - dz)) * gain).clamp(0.0, 1.0).toDouble();
     return [x / m * scaled, y / m * scaled];
   }
 
@@ -383,11 +496,12 @@ class _GamepadScreenState extends State<GamepadScreen> {
   }
 
   Widget _sliderRow(String label, double value, double min, double max,
-      ValueChanged<double> onChanged) {
+      ValueChanged<double> onChanged,
+      {String Function(double v)? fmt, double labelWidth = 52, double valueWidth = 40}) {
     return Row(
       children: [
         SizedBox(
-          width: 52,
+          width: labelWidth,
           child: Text(label, style: const TextStyle(color: Colors.white70, fontSize: 12)),
         ),
         Expanded(
@@ -406,8 +520,8 @@ class _GamepadScreenState extends State<GamepadScreen> {
           ),
         ),
         SizedBox(
-          width: 40,
-          child: Text('${(value * 100).round()}%',
+          width: valueWidth,
+          child: Text(fmt != null ? fmt(value) : '${(value * 100).round()}%',
               textAlign: TextAlign.end,
               style: const TextStyle(color: Colors.white70, fontSize: 12)),
         ),
@@ -596,11 +710,162 @@ class _GamepadScreenState extends State<GamepadScreen> {
     );
   }
 
+  /// Live indicator of the steering value coming from the tilt sensor.
+  Widget _tiltMeter() {
+    return ValueListenableBuilder<double>(
+      valueListenable: _tiltPreview,
+      builder: (context, v, _) => SizedBox(
+        height: 14,
+        child: LayoutBuilder(
+          builder: (context, bc) {
+            final w = bc.maxWidth;
+            return Stack(
+              children: [
+                Positioned.fill(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.white12,
+                      borderRadius: BorderRadius.circular(7),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  left: w / 2 - 1,
+                  top: 0,
+                  bottom: 0,
+                  width: 2,
+                  child: const ColoredBox(color: Colors.white38),
+                ),
+                Positioned(
+                  left: (w - 14) * ((v.clamp(-1.0, 1.0) + 1) / 2),
+                  top: 0,
+                  width: 14,
+                  height: 14,
+                  child: const DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: AppColors.activeAccent,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _tiltRow() {
+    final st = _layout.settings;
+    const small = TextStyle(color: Colors.white70, fontSize: 12);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Wrap(
+          spacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            const Text('Tilt steering', style: small),
+            Switch(
+              value: st.tilt,
+              onChanged: (v) {
+                _layout.tweak((s) => s.tilt = v);
+                _layout.save();
+              },
+            ),
+            const Text('Controls', style: small),
+            for (final e in const [(false, 'Left stick X'), (true, 'Right stick X')])
+              Padding(
+                padding: const EdgeInsets.only(left: 4),
+                child: ChoiceChip(
+                  label: Text(e.$2, style: const TextStyle(fontSize: 11)),
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  selected: st.tiltRightStick == e.$1,
+                  onSelected: (_) {
+                    _layout.tweak((s) => s.tiltRightStick = e.$1);
+                    _layout.save();
+                  },
+                ),
+              ),
+            const SizedBox(width: 4),
+            const Text('Invert', style: small),
+            Switch(
+              value: st.tiltInvert,
+              onChanged: (v) {
+                _layout.tweak((s) => s.tiltInvert = v);
+                _layout.save();
+              },
+            ),
+            TextButton.icon(
+              onPressed: st.tilt ? _calibrateTilt : null,
+              icon: const Icon(Icons.my_location, size: 16),
+              label: const Text('Set center'),
+            ),
+          ],
+        ),
+        Row(
+          children: [
+            Expanded(
+              child: _sliderRow(
+                'Sensitivity',
+                st.tiltSens,
+                LayoutStore.minTiltSens,
+                LayoutStore.maxTiltSens,
+                (v) => _layout.tweak((s) => s.tiltSens = v),
+                fmt: (v) => '${(45 / v).round()}°',
+                labelWidth: 74,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _sliderRow(
+                'Deadzone',
+                st.tiltDeadzone,
+                0,
+                LayoutStore.maxTiltDeadzone,
+                (v) => _layout.tweak((s) => s.tiltDeadzone = v),
+                fmt: (v) => '${v.round()}°',
+                labelWidth: 74,
+              ),
+            ),
+          ],
+        ),
+        Row(
+          children: [
+            Expanded(
+              child: _sliderRow(
+                'Smoothing',
+                st.tiltSmooth,
+                0,
+                0.9,
+                (v) => _layout.tweak((s) => s.tiltSmooth = v),
+                labelWidth: 74,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(child: st.tilt ? _tiltMeter() : const SizedBox.shrink()),
+          ],
+        ),
+        const Align(
+          alignment: Alignment.centerLeft,
+          child: Text(
+            'Hold the phone like a steering wheel. The degrees next to '
+            'Sensitivity = how far you turn for full steering lock.',
+            style: TextStyle(color: Colors.white38, fontSize: 10),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _editPanel() {
     final id = _selected;
     final spec = id == null ? null : _layout.spec(id);
     final it = id == null ? null : _layout.of(id);
     final isStick = id == 'lstick' || id == 'rstick';
+    final isTrigger = id == 'lt' || id == 'rt';
     final st = _layout.settings;
     // Keep the panel away from the control being edited.
     final atTop = it != null && it.y > 0.5;
@@ -638,7 +903,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
               ],
             ),
             _profileRow(),
-            if (id != null && it != null && spec != null)
+            if (id != null && it != null && spec != null) ...[
               Row(
                 children: [
                   Expanded(
@@ -673,23 +938,87 @@ class _GamepadScreenState extends State<GamepadScreen> {
                     ),
                   ],
                 ],
-              )
-            else ...[
+              ),
+              if (isStick)
+                Row(
+                  children: [
+                    Expanded(
+                      child: _sliderRow(
+                        'Sensitivity',
+                        id == 'lstick' ? st.sensL : st.sensR,
+                        LayoutStore.minSensitivity,
+                        LayoutStore.maxSensitivity,
+                        (v) => _layout.setSensitivity(id == 'lstick', v),
+                        labelWidth: 74,
+                        valueWidth: 44,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _sliderRow(
+                        'Deadzone',
+                        id == 'lstick' ? st.deadzoneL : st.deadzoneR,
+                        0,
+                        LayoutStore.maxDeadzone,
+                        (v) => _layout.setDeadzone(id == 'lstick', v),
+                        labelWidth: 74,
+                      ),
+                    ),
+                  ],
+                ),
+              if (isTrigger)
+                Row(
+                  children: [
+                    const Text('Double-tap to lock fully pressed', style: small),
+                    const SizedBox(width: 6),
+                    Switch(
+                      value: id == 'lt' ? st.latchLt : st.latchRt,
+                      onChanged: (v) {
+                        _layout.setLatch(id == 'lt', v);
+                        _layout.save();
+                      },
+                    ),
+                    const Expanded(
+                      child: Text('tap again to release',
+                          style: TextStyle(color: Colors.white38, fontSize: 10)),
+                    ),
+                  ],
+                ),
+              if (isTrigger)
+                Row(
+                  children: [
+                    const Text('Slide to steer (moves right stick)', style: small),
+                    const SizedBox(width: 6),
+                    Switch(
+                      value: id == 'lt' ? st.steerLt : st.steerRt,
+                      onChanged: (v) {
+                        _layout.setSteer(id == 'lt', v);
+                        _layout.save();
+                      },
+                    ),
+                    const Expanded(
+                      child: Text('press = full, slide finger = stick',
+                          style: TextStyle(color: Colors.white38, fontSize: 10)),
+                    ),
+                  ],
+                ),
+            ] else ...[
               Row(
                 children: [
-                  Expanded(
-                    child: _sliderRow('Deadzone', st.deadzone, 0, LayoutStore.maxDeadzone,
-                        _layout.setDeadzone),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _sliderRow('Sensitivity', st.sensitivity,
-                        LayoutStore.minSensitivity, LayoutStore.maxSensitivity,
-                        _layout.setSensitivity),
-                  ),
+                  for (final e in const [(0, 'General'), (1, 'Tilt steering')])
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: ChoiceChip(
+                        label: Text(e.$2, style: const TextStyle(fontSize: 11)),
+                        visualDensity: VisualDensity.compact,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        selected: _panelTab == e.$1,
+                        onSelected: (_) => setState(() => _panelTab = e.$1),
+                      ),
+                    ),
                 ],
               ),
-              _globalRow(),
+              if (_panelTab == 0) _globalRow() else _tiltRow(),
             ],
             if (id != null && it != null && spec != null && spec.canColor)
               _colorRow(id, it),
@@ -705,9 +1034,16 @@ class _GamepadScreenState extends State<GamepadScreen> {
       right: 0,
       child: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 680),
+          constraints: BoxConstraints(
+            maxWidth: 680,
+            maxHeight: MediaQuery.of(context).size.height - 12,
+          ),
           // Absorb touches so they don't fall through to controls underneath.
-          child: GestureDetector(behavior: HitTestBehavior.opaque, onTap: () {}, child: panel),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {},
+            child: SingleChildScrollView(child: panel),
+          ),
         ),
       ),
     );
@@ -745,6 +1081,27 @@ class _GamepadScreenState extends State<GamepadScreen> {
     );
   }
 
+  /// Tap to set the current phone angle as "straight" (tilt steering only).
+  Widget _calibChip(BoxConstraints c) {
+    final p = _editButtonTopLeft(c);
+    return Positioned(
+      left: p.dx,
+      top: p.dy + 42,
+      width: 36,
+      height: 36,
+      child: GestureDetector(
+        onTap: _calibrateTilt,
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.35),
+            shape: BoxShape.circle,
+          ),
+          child: const Icon(Icons.screen_rotation, color: Colors.white70, size: 18),
+        ),
+      ),
+    );
+  }
+
   /// Tap to jump to the next layout profile (only shown with 2+ profiles).
   Widget _profileChip(BoxConstraints c) {
     final p = _editButtonTopLeft(c);
@@ -755,7 +1112,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
       child: GestureDetector(
         onTap: () {
           HapticFeedback.selectionClick();
-          _state.releaseAll();
+          _releaseAll();
           _layout.nextProfile();
           _layout.save();
         },
@@ -825,8 +1182,13 @@ class _GamepadScreenState extends State<GamepadScreen> {
                             'lt',
                             c,
                             TriggerWidget(
+                              key: ValueKey('lt-${_layout.active}'),
                               label: 'LT',
                               color: _colorOf('lt'),
+                              latchEnabled: _layout.settings.latchLt,
+                              steerEnabled: _layout.settings.steerLt,
+                              onSteer: _handleTriggerSteer,
+                              onLatchChanged: (_) => HapticFeedback.mediumImpact(),
                               size: 112,
                               onChanged: (v) {
                                 _handleTriggerHaptic(v, true);
@@ -950,7 +1312,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                                     color: _colorOf('lstick'),
                                     onChanged: (x, y) {
                                       _handleJoystickHaptic(x, y, true);
-                                      final v = _shape(x, y);
+                                      final v = _shape(x, y, left: true);
                                       _state.setLeftStick(v[0], v[1]);
                                     },
                                   )
@@ -959,7 +1321,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                                     color: _colorOf('lstick'),
                                     onChanged: (x, y) {
                                       _handleJoystickHaptic(x, y, true);
-                                      final v = _shape(x, y);
+                                      final v = _shape(x, y, left: true);
                                       _state.setLeftStick(v[0], v[1]);
                                     },
                                   )),
@@ -974,7 +1336,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                                     color: _colorOf('rstick'),
                                     onChanged: (x, y) {
                                       _handleJoystickHaptic(x, y, false);
-                                      final v = _shape(x, y);
+                                      final v = _shape(x, y, left: false);
                                       _state.setRightStick(v[0], v[1]);
                                     },
                                   )
@@ -983,7 +1345,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                                     color: _colorOf('rstick'),
                                     onChanged: (x, y) {
                                       _handleJoystickHaptic(x, y, false);
-                                      final v = _shape(x, y);
+                                      final v = _shape(x, y, left: false);
                                       _state.setRightStick(v[0], v[1]);
                                     },
                                   )),
@@ -1002,8 +1364,13 @@ class _GamepadScreenState extends State<GamepadScreen> {
                             'rt',
                             c,
                             TriggerWidget(
+                              key: ValueKey('rt-${_layout.active}'),
                               label: 'RT',
                               color: _colorOf('rt'),
+                              latchEnabled: _layout.settings.latchRt,
+                              steerEnabled: _layout.settings.steerRt,
+                              onSteer: _handleTriggerSteer,
+                              onLatchChanged: (_) => HapticFeedback.mediumImpact(),
                               size: 112,
                               onChanged: (v) {
                                 _handleTriggerHaptic(v, false);
@@ -1011,15 +1378,46 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               },
                             )),
 
-                        // ABXY diamond
-                        _item('face', c,
-                            _FaceButtons(onButtonPressed: _handleButtonPress, size: 150)),
+                        // A / B / X / Y — each one is its own movable control
+                        _item(
+                            'btn_y',
+                            c,
+                            GamepadButtonWidget(
+                              label: 'Y',
+                              color: _colorOr('btn_y', AppColors.buttonY),
+                              onChanged: (p) => _handleButtonPress(Protocol.bitY, p),
+                            )),
+                        _item(
+                            'btn_a',
+                            c,
+                            GamepadButtonWidget(
+                              label: 'A',
+                              color: _colorOr('btn_a', AppColors.buttonA),
+                              onChanged: (p) => _handleButtonPress(Protocol.bitA, p),
+                            )),
+                        _item(
+                            'btn_x',
+                            c,
+                            GamepadButtonWidget(
+                              label: 'X',
+                              color: _colorOr('btn_x', AppColors.buttonX),
+                              onChanged: (p) => _handleButtonPress(Protocol.bitX, p),
+                            )),
+                        _item(
+                            'btn_b',
+                            c,
+                            GamepadButtonWidget(
+                              label: 'B',
+                              color: _colorOr('btn_b', AppColors.buttonB),
+                              onChanged: (p) => _handleButtonPress(Protocol.bitB, p),
+                            )),
 
                         if (_editing)
                           _editPanel()
                         else ...[
                           _editButton(c),
                           if (_layout.profileNames.length > 1) _profileChip(c),
+          if (_layout.settings.tilt) _calibChip(c),
                         ],
                       ],
                     );
@@ -1029,57 +1427,6 @@ class _GamepadScreenState extends State<GamepadScreen> {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _FaceButtons extends StatelessWidget {
-  final void Function(int buttonBit, bool isPressed) onButtonPressed;
-  final double size;
-  const _FaceButtons({required this.onButtonPressed, required this.size});
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: size,
-      height: size,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          Positioned(
-            top: 0,
-            child: GamepadButtonWidget(
-              label: 'Y',
-              color: AppColors.buttonY,
-              onChanged: (p) => onButtonPressed(Protocol.bitY, p),
-            ),
-          ),
-          Positioned(
-            bottom: 0,
-            child: GamepadButtonWidget(
-              label: 'A',
-              color: AppColors.buttonA,
-              onChanged: (p) => onButtonPressed(Protocol.bitA, p),
-            ),
-          ),
-          Positioned(
-            left: 0,
-            child: GamepadButtonWidget(
-              label: 'X',
-              color: AppColors.buttonX,
-              onChanged: (p) => onButtonPressed(Protocol.bitX, p),
-            ),
-          ),
-          Positioned(
-            right: 0,
-            child: GamepadButtonWidget(
-              label: 'B',
-              color: AppColors.buttonB,
-              onChanged: (p) => onButtonPressed(Protocol.bitB, p),
-            ),
-          ),
-        ],
       ),
     );
   }

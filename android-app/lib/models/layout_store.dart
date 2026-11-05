@@ -72,54 +72,125 @@ class ItemLayout {
 
 /// Per-profile input tuning.
 class ProfileSettings {
-  /// Radial deadzone for both sticks (0 = none).
-  double deadzone;
-
-  /// Stick gain: >1 reaches full deflection sooner, <1 is gentler.
-  double sensitivity;
+  /// Per-stick radial deadzone (0 = none) and gain.
+  /// Gain >1 reaches full deflection sooner, <1 is gentler.
+  double deadzoneL, deadzoneR, sensL, sensR;
 
   bool floatLeft, floatRight;
 
   /// Vibration feedback on touches: 0 = off, 1 = light, 2 = strong.
   int haptics;
 
+  /// Double-tap-to-lock on the triggers (stays fully pressed until tapped).
+  bool latchLt, latchRt;
+
+  /// Sliding a pressed trigger sideways/up/down also moves the right stick.
+  bool steerLt, steerRt;
+
+  /// Tilt steering (phone rotated like a steering wheel).
+  bool tilt;
+  bool tiltRightStick; // false = drives the left stick X, true = right stick X
+  bool tiltInvert;
+  double tiltSens; // gain: full lock at 45° / tiltSens
+  double tiltDeadzone; // degrees
+  double tiltSmooth; // 0 = raw, 0.9 = very smooth
+  double tiltCenter; // calibrated "straight" angle in degrees
+
   ProfileSettings({
-    this.deadzone = 0.0,
-    this.sensitivity = 1.0,
+    this.deadzoneL = 0.0,
+    this.deadzoneR = 0.0,
+    this.sensL = 1.0,
+    this.sensR = 1.0,
     this.floatLeft = false,
     this.floatRight = false,
     this.haptics = 1,
+    this.latchLt = false,
+    this.latchRt = false,
+    this.steerLt = false,
+    this.steerRt = false,
+    this.tilt = false,
+    this.tiltRightStick = false,
+    this.tiltInvert = false,
+    this.tiltSens = 1.0,
+    this.tiltDeadzone = 2.0,
+    this.tiltSmooth = 0.3,
+    this.tiltCenter = 0.0,
   });
 
   Map<String, dynamic> toJson() => {
-        'dz': deadzone,
-        'sens': sensitivity,
+        'dzl': deadzoneL,
+        'dzr': deadzoneR,
+        'sl': sensL,
+        'sr': sensR,
         'fl': floatLeft,
         'fr': floatRight,
         'hp': haptics,
+        'llt': latchLt,
+        'lrt': latchRt,
+        'slt': steerLt,
+        'srt': steerRt,
+        'tilt': tilt,
+        'tr': tiltRightStick,
+        'ti': tiltInvert,
+        'ts': tiltSens,
+        'tdz': tiltDeadzone,
+        'tsm': tiltSmooth,
+        'tc': tiltCenter,
       };
 
   static ProfileSettings fromJson(Object? j) {
     if (j is! Map) return ProfileSettings();
     double n(Object? v, double d) => v is num ? v.toDouble() : d;
+    double sens(Object? v, Object? legacy) => n(v, n(legacy, 1))
+        .clamp(LayoutStore.minSensitivity, LayoutStore.maxSensitivity)
+        .toDouble();
+    double dz(Object? v, Object? legacy) =>
+        n(v, n(legacy, 0)).clamp(0.0, LayoutStore.maxDeadzone).toDouble();
     return ProfileSettings(
-      deadzone: n(j['dz'], 0).clamp(0.0, LayoutStore.maxDeadzone).toDouble(),
-      sensitivity: n(j['sens'], 1)
-          .clamp(LayoutStore.minSensitivity, LayoutStore.maxSensitivity)
-          .toDouble(),
+      // Older profiles stored one shared 'dz' / 'sens' for both sticks.
+      deadzoneL: dz(j['dzl'], j['dz']),
+      deadzoneR: dz(j['dzr'], j['dz']),
+      sensL: sens(j['sl'], j['sens']),
+      sensR: sens(j['sr'], j['sens']),
       floatLeft: j['fl'] == true,
       floatRight: j['fr'] == true,
       // Older versions stored a bool here.
       haptics: j['hp'] is int ? (j['hp'] as int).clamp(0, 2) : (j['hp'] == false ? 0 : 1),
+      latchLt: j['llt'] == true,
+      latchRt: j['lrt'] == true,
+      steerLt: j['slt'] == true,
+      steerRt: j['srt'] == true,
+      tilt: j['tilt'] == true,
+      tiltRightStick: j['tr'] == true,
+      tiltInvert: j['ti'] == true,
+      tiltSens: n(j['ts'], 1)
+          .clamp(LayoutStore.minTiltSens, LayoutStore.maxTiltSens)
+          .toDouble(),
+      tiltDeadzone: n(j['tdz'], 2).clamp(0.0, LayoutStore.maxTiltDeadzone).toDouble(),
+      tiltSmooth: n(j['tsm'], 0.3).clamp(0.0, 0.9).toDouble(),
+      tiltCenter: n(j['tc'], 0).clamp(-90.0, 90.0).toDouble(),
     );
   }
 
   ProfileSettings copy() => ProfileSettings(
-        deadzone: deadzone,
-        sensitivity: sensitivity,
+        deadzoneL: deadzoneL,
+        deadzoneR: deadzoneR,
+        sensL: sensL,
+        sensR: sensR,
         floatLeft: floatLeft,
         floatRight: floatRight,
         haptics: haptics,
+        latchLt: latchLt,
+        latchRt: latchRt,
+        steerLt: steerLt,
+        steerRt: steerRt,
+        tilt: tilt,
+        tiltRightStick: tiltRightStick,
+        tiltInvert: tiltInvert,
+        tiltSens: tiltSens,
+        tiltDeadzone: tiltDeadzone,
+        tiltSmooth: tiltSmooth,
+        tiltCenter: tiltCenter,
       );
 }
 
@@ -149,6 +220,29 @@ class _Profile {
       items[s.id] = ItemLayout.fromJson(raw is Map ? raw[s.id] : null, s) ??
           ItemLayout(x: s.x, y: s.y);
     }
+    // Older profiles had one combined "face" diamond: spread the four
+    // buttons around where the diamond used to be.
+    if (raw is Map && raw['face'] is Map) {
+      final f = ItemLayout.fromJson(raw['face'], LayoutStore.faceLegacySpec);
+      if (f != null) {
+        const offs = {
+          'btn_y': [0.0, -0.12],
+          'btn_a': [0.0, 0.12],
+          'btn_x': [-0.055, 0.0],
+          'btn_b': [0.055, 0.0],
+        };
+        offs.forEach((id, o) {
+          if (raw[id] != null) return;
+          items[id] = ItemLayout(
+            x: (f.x + o[0] * f.scale).clamp(0.0, 1.0).toDouble(),
+            y: (f.y + o[1] * f.scale).clamp(0.0, 1.0).toDouble(),
+            scale: f.scale,
+            opacity: f.opacity,
+            visible: f.visible,
+          );
+        });
+      }
+    }
     return _Profile(items, ProfileSettings.fromJson(p['settings']));
   }
 }
@@ -164,8 +258,15 @@ class LayoutStore extends ChangeNotifier {
   static const double maxScale = 2.0;
   static const double minOpacity = 0.2;
   static const double maxDeadzone = 0.35;
-  static const double minSensitivity = 0.5;
-  static const double maxSensitivity = 1.5;
+  static const double minSensitivity = 0.2;
+  static const double maxSensitivity = 3.0;
+  static const double minTiltSens = 0.3;
+  static const double maxTiltSens = 3.0;
+  static const double maxTiltDeadzone = 15.0;
+
+  /// Only used to read the position of the old combined A/B/X/Y control.
+  static const ItemSpec faceLegacySpec =
+      ItemSpec('face', 'A / B / X / Y', 0.890, 0.620, 150, 150);
 
   /// Default positions copied from the original fixed layout.
   static const List<ItemSpec> specs = [
@@ -184,7 +285,10 @@ class LayoutStore extends ChangeNotifier {
         floatW: 260, floatH: 220),
     ItemSpec('rb', 'RB bumper', 0.815, 0.346, 70, 70),
     ItemSpec('rt', 'RT trigger', 0.922, 0.182, 112, 112),
-    ItemSpec('face', 'A / B / X / Y', 0.890, 0.620, 150, 150, canColor: false),
+    ItemSpec('btn_y', 'Y button', 0.890, 0.500, 56, 56),
+    ItemSpec('btn_a', 'A button', 0.890, 0.741, 56, 56),
+    ItemSpec('btn_x', 'X button', 0.835, 0.620, 56, 56),
+    ItemSpec('btn_b', 'B button', 0.946, 0.620, 56, 56),
   ];
 
   static final Map<String, ItemSpec> _specById = {
@@ -306,13 +410,47 @@ class LayoutStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setDeadzone(double v) {
-    settings.deadzone = v.clamp(0.0, maxDeadzone).toDouble();
+  void setDeadzone(bool left, double v) {
+    final c = v.clamp(0.0, maxDeadzone).toDouble();
+    if (left) {
+      settings.deadzoneL = c;
+    } else {
+      settings.deadzoneR = c;
+    }
     notifyListeners();
   }
 
-  void setSensitivity(double v) {
-    settings.sensitivity = v.clamp(minSensitivity, maxSensitivity).toDouble();
+  void setSensitivity(bool left, double v) {
+    final c = v.clamp(minSensitivity, maxSensitivity).toDouble();
+    if (left) {
+      settings.sensL = c;
+    } else {
+      settings.sensR = c;
+    }
+    notifyListeners();
+  }
+
+  void setLatch(bool left, bool v) {
+    if (left) {
+      settings.latchLt = v;
+    } else {
+      settings.latchRt = v;
+    }
+    notifyListeners();
+  }
+
+  void setSteer(bool left, bool v) {
+    if (left) {
+      settings.steerLt = v;
+    } else {
+      settings.steerRt = v;
+    }
+    notifyListeners();
+  }
+
+  /// Applies [fn] to the profile's settings and notifies listeners.
+  void tweak(void Function(ProfileSettings s) fn) {
+    fn(settings);
     notifyListeners();
   }
 

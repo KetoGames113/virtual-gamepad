@@ -80,15 +80,15 @@ class ProfileSettings {
 
   bool floatLeft, floatRight;
 
-  /// Vibration feedback on touches.
-  bool haptics;
+  /// Vibration feedback on touches: 0 = off, 1 = light, 2 = strong.
+  int haptics;
 
   ProfileSettings({
     this.deadzone = 0.0,
     this.sensitivity = 1.0,
     this.floatLeft = false,
     this.floatRight = false,
-    this.haptics = true,
+    this.haptics = 1,
   });
 
   Map<String, dynamic> toJson() => {
@@ -109,7 +109,8 @@ class ProfileSettings {
           .toDouble(),
       floatLeft: j['fl'] == true,
       floatRight: j['fr'] == true,
-      haptics: j['hp'] is bool ? j['hp'] as bool : true,
+      // Older versions stored a bool here.
+      haptics: j['hp'] is int ? (j['hp'] as int).clamp(0, 2) : (j['hp'] == false ? 0 : 1),
     );
   }
 
@@ -315,8 +316,8 @@ class LayoutStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setHaptics(bool v) {
-    settings.haptics = v;
+  void setHaptics(int v) {
+    settings.haptics = v.clamp(0, 2);
     notifyListeners();
   }
 

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'splash_screen.dart';
+import 'theme.dart';
 
 void main() {
   runApp(const VirtualGamepadApp());
@@ -14,13 +15,7 @@ class VirtualGamepadApp extends StatelessWidget {
     return MaterialApp(
       title: 'Virtual Gamepad',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark(useMaterial3: true).copyWith(
-        scaffoldBackgroundColor: const Color(0xFF121212),
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.deepPurple,
-          brightness: Brightness.dark,
-        ),
-      ),
+      theme: AppTheme.dark(),
       home: const SplashScreen(),
     );
   }

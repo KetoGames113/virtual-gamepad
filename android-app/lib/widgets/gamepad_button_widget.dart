@@ -39,32 +39,46 @@ class _GamepadButtonWidgetState extends State<GamepadButtonWidget> {
     final baseColor = widget.solid ? widget.color : widget.color.withOpacity(0.18);
     final pressedColor = widget.solid ? Color.lerp(widget.color, Colors.white, 0.35)! : widget.color.withOpacity(0.9);
 
+    final glow = BoxShadow(
+      color: widget.color.withOpacity(0.55),
+      blurRadius: 18,
+      spreadRadius: 1,
+    );
+
     return GestureDetector(
       onTapDown: (_) => _set(true),
       onTapUp: (_) => _set(false),
       onTapCancel: () => _set(false),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 60),
-        width: widget.pill ? widget.size * 1.8 : widget.size,
-        height: widget.size,
-        decoration: BoxDecoration(
-          color: _pressed ? pressedColor : baseColor,
-          borderRadius: BorderRadius.circular(widget.size / 2),
-          boxShadow: widget.solid
-              ? [BoxShadow(color: Colors.black.withOpacity(0.25), blurRadius: 6, offset: const Offset(0, 2))]
-              : null,
-        ),
-        alignment: Alignment.center,
-        child: widget.icon != null
-            ? Icon(widget.icon, color: Colors.white, size: widget.size * 0.5)
-            : Text(
-                widget.label,
-                style: TextStyle(
-                  color: widget.solid ? Colors.white : (_pressed ? Colors.black : Colors.white.withOpacity(0.85)),
-                  fontWeight: FontWeight.bold,
-                  fontSize: widget.pill ? 12 : 18,
+      child: AnimatedScale(
+        scale: _pressed ? 0.92 : 1.0,
+        duration: const Duration(milliseconds: 90),
+        curve: Curves.easeOut,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 90),
+          curve: Curves.easeOut,
+          width: widget.pill ? widget.size * 1.8 : widget.size,
+          height: widget.size,
+          decoration: BoxDecoration(
+            color: _pressed ? pressedColor : baseColor,
+            borderRadius: BorderRadius.circular(widget.size / 2),
+            boxShadow: _pressed
+                ? [glow]
+                : (widget.solid
+                    ? [BoxShadow(color: Colors.black.withOpacity(0.25), blurRadius: 6, offset: const Offset(0, 2))]
+                    : null),
+          ),
+          alignment: Alignment.center,
+          child: widget.icon != null
+              ? Icon(widget.icon, color: Colors.white, size: widget.size * 0.5)
+              : Text(
+                  widget.label,
+                  style: TextStyle(
+                    color: widget.solid ? Colors.white : (_pressed ? Colors.black : Colors.white.withOpacity(0.85)),
+                    fontWeight: FontWeight.bold,
+                    fontSize: widget.pill ? 12 : 18,
+                  ),
                 ),
-              ),
+        ),
       ),
     );
   }

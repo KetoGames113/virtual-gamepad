@@ -16,8 +16,13 @@ import '../widgets/joystick_widget.dart';
 import '../widgets/trigger_widget.dart';
 
 class GamepadScreen extends StatefulWidget {
-  final GamepadSocket socket;
-  const GamepadScreen({super.key, required this.socket});
+  /// The live connection. Null in [editorOnly] mode.
+  final GamepadSocket? socket;
+
+  /// Layout editor opened from the menu, before connecting to a PC.
+  final bool editorOnly;
+
+  const GamepadScreen({super.key, this.socket, this.editorOnly = false});
 
   @override
   State<GamepadScreen> createState() => _GamepadScreenState();
@@ -25,6 +30,7 @@ class GamepadScreen extends StatefulWidget {
 
 class _GamepadScreenState extends State<GamepadScreen> {
   late final GamepadState _state;
+  GamepadSocket? _ownSocket; // throwaway socket for the offline editor
   StreamSubscription? _connectionSubscription; // Handles the socket listener state
 
   // Track D-pad states to only vibrate when a direction is freshly clicked down
@@ -52,8 +58,13 @@ class _GamepadScreenState extends State<GamepadScreen> {
   @override
   void initState() {
     super.initState();
-    _state = GamepadState(widget.socket);
-    _state.start();
+    if (widget.socket == null) _ownSocket = GamepadSocket();
+    _state = GamepadState(widget.socket ?? _ownSocket!);
+    if (widget.editorOnly) {
+      _editing = true; // open straight in edit mode
+    } else {
+      _state.start();
+    }
     _layout.load();
     WakelockPlus.enable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
@@ -63,7 +74,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
     ]);
 
     // Listen for disconnections automatically from the socket network manager
-    _connectionSubscription = widget.socket.connectionStream.listen((isConnected) {
+    _connectionSubscription = widget.socket?.connectionStream.listen((isConnected) {
       if (!isConnected) {
         _handleConnectionLoss();
       }
@@ -76,6 +87,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
     _state.stop();
     _layout.save();
     _layout.dispose();
+    _ownSocket?.dispose();
     WakelockPlus.disable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setPreferredOrientations([
@@ -112,7 +124,14 @@ class _GamepadScreenState extends State<GamepadScreen> {
 
   /// Light vibration, unless the active profile turned vibration off.
   void _buzz() {
-    if (_layout.settings.haptics) HapticFeedback.lightImpact();
+    switch (_layout.settings.haptics) {
+      case 1:
+        HapticFeedback.lightImpact();
+        break;
+      case 2:
+        HapticFeedback.mediumImpact();
+        break;
+    }
   }
 
   void _toast(String msg) {
@@ -124,7 +143,12 @@ class _GamepadScreenState extends State<GamepadScreen> {
 
   void _disconnect() {
     _buzz();
-    widget.socket.disconnect();
+    final socket = widget.socket;
+    if (socket == null) {
+      Navigator.of(context).pop(); // offline editor: just leave
+      return;
+    }
+    socket.disconnect();
     // No explicit call to pop() is needed here anymore! 
     // widget.socket.disconnect() will push a value to 'connectionStream', 
     // triggering _handleConnectionLoss() naturally.
@@ -194,6 +218,10 @@ class _GamepadScreenState extends State<GamepadScreen> {
 
   void _exitEdit() {
     _layout.save();
+    if (widget.editorOnly) {
+      Navigator.of(context).pop();
+      return;
+    }
     setState(() {
       _editing = false;
       _selected = null;
@@ -531,20 +559,29 @@ class _GamepadScreenState extends State<GamepadScreen> {
 
   Widget _globalRow() {
     const small = TextStyle(color: Colors.white70, fontSize: 12);
-    return Row(
+    return Wrap(
+      spacing: 4,
+      crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         const Text('Grid', style: small),
         Switch(value: _snap, onChanged: (v) => setState(() => _snap = v)),
         const SizedBox(width: 4),
         const Text('Vibration', style: small),
-        Switch(
-          value: _layout.settings.haptics,
-          onChanged: (v) {
-            _layout.setHaptics(v);
-            _layout.save();
-          },
-        ),
-        const Spacer(),
+        for (final e in const [(0, 'Off'), (1, 'Light'), (2, 'Strong')])
+          Padding(
+            padding: const EdgeInsets.only(left: 4),
+            child: ChoiceChip(
+              label: Text(e.$2, style: const TextStyle(fontSize: 11)),
+              visualDensity: VisualDensity.compact,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              selected: _layout.settings.haptics == e.$1,
+              onSelected: (_) {
+                _layout.setHaptics(e.$1);
+                _layout.save();
+                _buzz(); // feel the new strength right away
+              },
+            ),
+          ),
         TextButton.icon(
           onPressed: _copyProfile,
           icon: const Icon(Icons.copy, size: 16),
@@ -755,7 +792,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
   @override
   Widget build(BuildContext context) {
     return PopScope(
-      canPop: !_editing,
+      canPop: widget.editorOnly || !_editing,
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop && _editing) _exitEdit();
       },

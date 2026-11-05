@@ -11,12 +11,14 @@ class TriggerWidget extends StatefulWidget {
   final String label;
   final double size;
   final void Function(double value) onChanged;
+  final Color? color;
 
   const TriggerWidget({
     super.key,
     required this.label,
     required this.onChanged,
     this.size = 90,
+    this.color,
   });
 
   @override
@@ -48,9 +50,9 @@ class _TriggerWidgetState extends State<TriggerWidget> {
         width: widget.size,
         height: widget.size,
         clipBehavior: Clip.antiAlias,
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: AppColors.stickFill,
+          color: widget.color ?? AppColors.stickFill,
         ),
         child: Stack(
           alignment: Alignment.bottomCenter,

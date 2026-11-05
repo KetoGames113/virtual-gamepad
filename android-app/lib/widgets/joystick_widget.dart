@@ -9,12 +9,14 @@ class JoystickWidget extends StatefulWidget {
   final double size;
   final void Function(double x, double y) onChanged;
   final String? label;
+  final Color? color;
 
   const JoystickWidget({
     super.key,
     required this.onChanged,
     this.size = 140,
     this.label,
+    this.color,
   });
 
   @override
@@ -56,9 +58,9 @@ class _JoystickWidgetState extends State<JoystickWidget> {
           child: Container(
             width: widget.size,
             height: widget.size,
-            decoration: const BoxDecoration(
+            decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: AppColors.stickFill,
+              color: widget.color ?? AppColors.stickFill,
             ),
             child: Center(
               child: Transform.translate(

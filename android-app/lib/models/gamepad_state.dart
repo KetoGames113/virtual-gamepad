@@ -34,6 +34,14 @@ class GamepadState {
     _ticker = null;
   }
 
+  /// Releases every button and centres every axis (used when entering the
+  /// layout editor so nothing stays "held" on the PC).
+  void releaseAll() {
+    _buttons = 0;
+    lx = ly = rx = ry = 0;
+    lt = rt = 0;
+  }
+
   void setButton(int bit, bool pressed) {
     if (pressed) {
       _buttons |= (1 << bit);

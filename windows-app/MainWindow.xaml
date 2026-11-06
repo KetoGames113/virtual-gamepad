@@ -105,7 +105,7 @@
 
                     <Border Background="White" CornerRadius="12" Padding="20,12" Margin="0,0,0,10">
                         <StackPanel>
-                            <TextBlock x:Name="ConnectedCountText" Text="Connected Device : 0" HorizontalAlignment="Center"
+                            <TextBlock x:Name="ConnectedCountText" Text="Connected Device : 0" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center"
                                        FontWeight="Bold" FontSize="16" Foreground="#111827"/>
                         </StackPanel>
                     </Border>

@@ -14,6 +14,8 @@ class Protocol {
   static const int typeDiscoverResponse = 5;
   static const int typeHelloAck = 6;
   static const int typeGoodbye = 7;
+  static const int typeActiveApp = 8;
+  static const int typeRumble = 9;
 
   static const int bitA = 0;
   static const int bitB = 1;
@@ -107,18 +109,32 @@ class ParsedReply {
   final int type;
   final String? hostName;
   final bool? helloOk;
-  ParsedReply({required this.type, this.hostName, this.helloOk});
+
+  /// RUMBLE: motor speeds 0-255 (large = heavy/low-frequency, small = light).
+  final int? rumbleLarge;
+  final int? rumbleSmall;
+  ParsedReply({
+    required this.type,
+    this.hostName,
+    this.helloOk,
+    this.rumbleLarge,
+    this.rumbleSmall,
+  });
 }
 
 ParsedReply? parseReply(Uint8List data) {
   if (data.length < 2 || data[0] != Protocol.magic) return null;
   final type = data[1];
-  if (type == Protocol.typeDiscoverResponse) {
+  if (type == Protocol.typeDiscoverResponse || type == Protocol.typeActiveApp) {
     if (data.length < 3) return null;
     final nameLen = data[2];
     if (data.length < 3 + nameLen) return null;
     final name = utf8.decode(data.sublist(3, 3 + nameLen));
     return ParsedReply(type: type, hostName: name);
+  }
+  if (type == Protocol.typeRumble) {
+    if (data.length < 4) return null;
+    return ParsedReply(type: type, rumbleLarge: data[2], rumbleSmall: data[3]);
   }
   if (type == Protocol.typeHelloAck) {
     if (data.length < 3) return null;

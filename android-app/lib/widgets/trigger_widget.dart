@@ -6,24 +6,31 @@ import '../theme.dart';
 /// position inside the circle sets the pressure (top = 0, bottom = 1);
 /// releasing snaps back to 0 like a spring-loaded trigger.
 ///
-/// With [latchEnabled], a quick double-tap locks the trigger fully pressed
-/// (value 1.0). It stays locked until the trigger is touched again, which
-/// releases the lock and returns to normal analog control.
+/// Optional extras:
+///  * [latchEnabled] – a quick double-tap locks the trigger at [latchLevel];
+///    touching it again releases the lock.
+///  * [steerEnabled] – slide-to-steer: while touched the trigger is fully
+///    pressed and the finger's offset from where it landed is reported via
+///    [onSteer] as x/y in [-1, 1] (y up).
+///  * [aimEnabled] – aim & fire: touching does NOT press the trigger; sliding
+///    aims (via [onSteer]) and pulling further than [aimFireK] aim-radii
+///    presses it fully (fire).
 class TriggerWidget extends StatefulWidget {
   final String label;
   final double size;
   final void Function(double value) onChanged;
   final Color? color;
+
   final bool latchEnabled;
-
-  /// Slide-to-steer: while touched the trigger is fully pressed and the
-  /// finger's offset from where it landed is reported through [onSteer]
-  /// as x/y in [-1, 1] (y up). [active] is false when the finger lifts.
-  final bool steerEnabled;
-  final void Function(double x, double y, bool active)? onSteer;
-
-  /// Called when the lock engages / releases (for haptics).
+  final double latchLevel;
   final void Function(bool latched)? onLatchChanged;
+
+  final bool steerEnabled;
+  final bool aimEnabled;
+  final double aimFireK;
+
+  /// [active] is false when the finger lifts.
+  final void Function(double x, double y, bool active)? onSteer;
 
   const TriggerWidget({
     super.key,
@@ -32,9 +39,12 @@ class TriggerWidget extends StatefulWidget {
     this.size = 90,
     this.color,
     this.latchEnabled = false,
-    this.steerEnabled = false,
-    this.onSteer,
+    this.latchLevel = 1.0,
     this.onLatchChanged,
+    this.steerEnabled = false,
+    this.aimEnabled = false,
+    this.aimFireK = 1.8,
+    this.onSteer,
   });
 
   @override
@@ -53,9 +63,15 @@ class _TriggerWidgetState extends State<TriggerWidget> {
   DateTime? _downAt;
   Offset? _downPos;
   bool _movedFar = false;
-  bool _steering = false;
-  Offset _steerOrigin = Offset.zero;
   DateTime? _lastTapUp; // when the previous short tap ended
+
+  bool _steering = false;
+  bool _firing = false;
+  Offset _origin = Offset.zero;
+  Offset _dot = Offset.zero; // finger offset shown while aiming
+
+  bool get _steerOn => widget.steerEnabled || widget.aimEnabled;
+  double get _radius => widget.aimEnabled ? widget.size * 0.25 : widget.size * 0.45;
 
   void _set(double v) {
     if (_value == v) return;
@@ -69,15 +85,34 @@ class _TriggerWidgetState extends State<TriggerWidget> {
     widget.onLatchChanged?.call(v);
   }
 
-  void _fromLocal(Offset local) => _set(widget.steerEnabled
-      ? 1.0
-      : (local.dy / widget.size).clamp(0.0, 1.0).toDouble());
+  double _pressureAt(Offset local) {
+    if (widget.aimEnabled) return 0.0; // aim mode fires by pulling further
+    if (widget.steerEnabled) return 1.0;
+    return (local.dy / widget.size).clamp(0.0, 1.0).toDouble();
+  }
 
   void _steerTo(Offset local) {
-    final r = widget.size * 0.45;
-    var d = (local - _steerOrigin) / r;
+    final r = _radius;
+    final raw = local - _origin;
+    var d = raw / r;
     if (d.distance > 1) d = d / d.distance;
     widget.onSteer?.call(d.dx, -d.dy, true);
+
+    if (widget.aimEnabled) {
+      final lim = widget.size * 0.4;
+      var dot = raw;
+      if (dot.distance > lim) dot = dot / dot.distance * lim;
+      setState(() => _dot = dot);
+
+      final fireDist = r * widget.aimFireK;
+      if (!_firing && raw.distance >= fireDist) {
+        _firing = true;
+        if (!_latched) _set(1.0);
+      } else if (_firing && raw.distance < fireDist * 0.85) {
+        _firing = false;
+        if (!_latched) _set(0.0);
+      }
+    }
   }
 
   void _down(PointerDownEvent e) {
@@ -87,27 +122,29 @@ class _TriggerWidgetState extends State<TriggerWidget> {
     _downAt = now;
     _downPos = e.localPosition;
     _movedFar = false;
-    _steering = widget.steerEnabled;
-    _steerOrigin = e.localPosition;
+    _steering = _steerOn;
+    _firing = false;
+    _origin = e.localPosition;
+    _dot = Offset.zero;
     if (_steering) widget.onSteer?.call(0, 0, true);
 
     if (_latched) {
       // Touch while locked: release the lock, finger takes over.
       _setLatched(false);
       _lastTapUp = null;
-      _fromLocal(e.localPosition);
+      _set(_pressureAt(e.localPosition));
       return;
     }
 
     final last = _lastTapUp;
     if (widget.latchEnabled && last != null && now.difference(last) <= _doubleTapWindow) {
-      // Second quick tap → lock at full pressure.
+      // Second quick tap → lock.
       _lastTapUp = null;
       _setLatched(true);
-      _set(1.0);
+      _set(widget.latchLevel);
       return;
     }
-    _fromLocal(e.localPosition);
+    _set(_pressureAt(e.localPosition));
   }
 
   void _move(PointerMoveEvent e) {
@@ -117,8 +154,9 @@ class _TriggerWidgetState extends State<TriggerWidget> {
       _movedFar = true;
     }
     if (_steering) _steerTo(e.localPosition);
-    if (_latched) return; // locked: ignore the finger until it lifts
-    _fromLocal(e.localPosition);
+    if (_latched) return; // locked: pressure stays where it is
+    if (widget.aimEnabled) return; // pressure handled by _steerTo
+    _set(_pressureAt(e.localPosition));
   }
 
   void _up(PointerEvent e) {
@@ -127,7 +165,9 @@ class _TriggerWidgetState extends State<TriggerWidget> {
     if (_steering) {
       _steering = false;
       widget.onSteer?.call(0, 0, false);
+      if (_dot != Offset.zero) setState(() => _dot = Offset.zero);
     }
+    _firing = false;
     final down = _downAt;
     final wasShortTap = e is PointerUpEvent &&
         !_movedFar &&
@@ -154,6 +194,7 @@ class _TriggerWidgetState extends State<TriggerWidget> {
   @override
   Widget build(BuildContext context) {
     final fill = _latched ? AppColors.activeAccent : Colors.white;
+    final aiming = _steering && widget.aimEnabled;
     return Listener(
       behavior: HitTestBehavior.opaque,
       onPointerDown: _down,
@@ -166,8 +207,24 @@ class _TriggerWidgetState extends State<TriggerWidget> {
         clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: widget.color ?? AppColors.stickFill,
-          border: _latched ? Border.all(color: AppColors.activeAccent, width: 3) : null,
+          gradient: RadialGradient(
+            colors: [
+              Color.lerp(widget.color ?? AppColors.stickFill, Colors.black, 0.4)!,
+              widget.color ?? AppColors.stickFill,
+              Color.lerp(widget.color ?? AppColors.stickFill, Colors.white, 0.12)!,
+            ],
+            stops: const [0.0, 0.7, 1.0],
+          ),
+          border: Border.all(
+            color: _latched ? AppColors.activeAccent : Colors.white.withOpacity(0.28),
+            width: _latched ? 3 : 2,
+          ),
+          boxShadow: [
+            BoxShadow(
+                color: (_latched ? AppColors.activeAccent : Colors.black)
+                    .withOpacity(_latched ? 0.45 : 0.35),
+                blurRadius: 12),
+          ],
         ),
         child: Stack(
           alignment: Alignment.bottomCenter,
@@ -175,15 +232,29 @@ class _TriggerWidgetState extends State<TriggerWidget> {
             FractionallySizedBox(
               heightFactor: _value.clamp(0.06, 1.0),
               widthFactor: 1,
-              child: Container(color: fill.withOpacity(_latched ? 0.7 : 0.55)),
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.bottomCenter,
+                    end: Alignment.topCenter,
+                    colors: [
+                      fill.withOpacity(_latched ? 0.8 : 0.65),
+                      fill.withOpacity(_latched ? 0.5 : 0.3),
+                    ],
+                  ),
+                  // Bright edge marks the current pressure level.
+                  border: Border(
+                    top: BorderSide(color: fill.withOpacity(0.9), width: 2),
+                  ),
+                ),
+              ),
             ),
             Align(
               alignment: Alignment.center,
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (_latched)
-                    const Icon(Icons.lock, color: Colors.white, size: 18),
+                  if (_latched) const Icon(Icons.lock, color: Colors.white, size: 18),
                   Text(
                     widget.label,
                     style: const TextStyle(
@@ -192,6 +263,19 @@ class _TriggerWidgetState extends State<TriggerWidget> {
                 ],
               ),
             ),
+            if (aiming)
+              Positioned(
+                left: _origin.dx + _dot.dx - 8,
+                top: _origin.dy + _dot.dy - 8,
+                width: 16,
+                height: 16,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _firing ? const Color(0xFFFF1744) : Colors.white,
+                  ),
+                ),
+              ),
           ],
         ),
       ),

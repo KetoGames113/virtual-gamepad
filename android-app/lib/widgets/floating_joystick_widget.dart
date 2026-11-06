@@ -104,6 +104,13 @@ class _FloatingJoystickWidgetState extends State<FloatingJoystickWidget> {
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: (widget.color ?? AppColors.stickFill).withOpacity(active ? 0.85 : 0.35),
+                  border: Border.all(
+                      color: Colors.white.withOpacity(active ? 0.5 : 0.2), width: 2),
+                  boxShadow: [
+                    BoxShadow(
+                        color: AppColors.activeAccent.withOpacity(active ? 0.25 : 0.0),
+                        blurRadius: 18),
+                  ],
                 ),
                 child: (!active && widget.label != null)
                     ? Text(widget.label!,
@@ -121,8 +128,20 @@ class _FloatingJoystickWidgetState extends State<FloatingJoystickWidget> {
                 top: o.dy + _knob.dy - s * 0.25,
                 width: s * 0.5,
                 height: s * 0.5,
-                child: const DecoratedBox(
-                  decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.white),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: const RadialGradient(
+                      center: Alignment(-0.3, -0.4),
+                      colors: [Colors.white, Color(0xFFD9D2FF), Color(0xFF8E7CFF)],
+                      stops: [0.0, 0.5, 1.0],
+                    ),
+                    border: Border.all(color: Colors.white.withOpacity(0.7), width: 1.5),
+                    boxShadow: [
+                      BoxShadow(
+                          color: AppColors.activeAccent.withOpacity(0.6), blurRadius: 16),
+                    ],
+                  ),
                 ),
               ),
           ],

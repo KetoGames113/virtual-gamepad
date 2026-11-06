@@ -76,16 +76,45 @@ class ProfileSettings {
   /// Gain >1 reaches full deflection sooner, <1 is gentler.
   double deadzoneL, deadzoneR, sensL, sensR;
 
+  /// Per-stick response curve (1 = linear, >1 = finer near the centre) and
+  /// vertical gain (separate Y sensitivity).
+  double curveL, curveR, yScaleL, yScaleR;
+
   bool floatLeft, floatRight;
 
   /// Vibration feedback on touches: 0 = off, 1 = light, 2 = strong.
   int haptics;
 
-  /// Double-tap-to-lock on the triggers (stays fully pressed until tapped).
-  bool latchLt, latchRt;
+  /// Game rumble coming from the PC: 0 = off, 1 = full strength.
+  double rumble;
 
-  /// Sliding a pressed trigger sideways/up/down also moves the right stick.
+  /// Double-tap-to-lock on the triggers, and how far they lock (0..1).
+  bool latchLt, latchRt;
+  double latchLevelLt, latchLevelRt;
+
+  /// Sliding a pressed trigger also moves the right stick.
   bool steerLt, steerRt;
+
+  /// Aim & fire: slide = aim with the right stick, pull further = full press.
+  bool aimLt, aimRt;
+  double aimFire; // pull distance (in aim radii) that fires
+
+  /// Item ids whose button works as a toggle (tap on / tap off).
+  Set<String> toggles;
+
+  /// PC process names (lowercase, no .exe) that auto-select this profile.
+  List<String> games;
+
+  /// Item ids whose button auto-repeats while held (rapid fire).
+  Set<String> turbo;
+
+  /// Click L3 automatically when the left stick is pushed fully forward.
+  bool autoSprint;
+
+  /// Gyro aiming: rotating the phone moves the right stick.
+  bool gyro;
+  double gyroSens;
+  bool gyroInvertY;
 
   /// Tilt steering (phone rotated like a steering wheel).
   bool tilt;
@@ -94,53 +123,97 @@ class ProfileSettings {
   double tiltSens; // gain: full lock at 45° / tiltSens
   double tiltDeadzone; // degrees
   double tiltSmooth; // 0 = raw, 0.9 = very smooth
+  double tiltCurve; // 1 = linear
   double tiltCenter; // calibrated "straight" angle in degrees
+  bool tiltAuto; // re-centre automatically when play starts
 
   ProfileSettings({
     this.deadzoneL = 0.0,
     this.deadzoneR = 0.0,
     this.sensL = 1.0,
     this.sensR = 1.0,
+    this.curveL = 1.0,
+    this.curveR = 1.0,
+    this.yScaleL = 1.0,
+    this.yScaleR = 1.0,
     this.floatLeft = false,
     this.floatRight = false,
     this.haptics = 1,
+    this.rumble = 1.0,
     this.latchLt = false,
     this.latchRt = false,
+    this.latchLevelLt = 1.0,
+    this.latchLevelRt = 1.0,
     this.steerLt = false,
     this.steerRt = false,
+    this.aimLt = false,
+    this.aimRt = false,
+    this.aimFire = 1.8,
+    Set<String>? toggles,
+    List<String>? games,
+    Set<String>? turbo,
+    this.autoSprint = false,
+    this.gyro = false,
+    this.gyroSens = 1.0,
+    this.gyroInvertY = false,
     this.tilt = false,
     this.tiltRightStick = false,
     this.tiltInvert = false,
     this.tiltSens = 1.0,
     this.tiltDeadzone = 2.0,
     this.tiltSmooth = 0.3,
+    this.tiltCurve = 1.0,
     this.tiltCenter = 0.0,
-  });
+    this.tiltAuto = false,
+  })  : toggles = toggles ?? <String>{},
+        games = games ?? <String>[],
+        turbo = turbo ?? <String>{};
 
   Map<String, dynamic> toJson() => {
         'dzl': deadzoneL,
         'dzr': deadzoneR,
         'sl': sensL,
         'sr': sensR,
+        'cl': curveL,
+        'cr': curveR,
+        'yl': yScaleL,
+        'yr': yScaleR,
         'fl': floatLeft,
         'fr': floatRight,
         'hp': haptics,
+        'rmb': rumble,
         'llt': latchLt,
         'lrt': latchRt,
+        'llv': latchLevelLt,
+        'rlv': latchLevelRt,
         'slt': steerLt,
         'srt': steerRt,
+        'alt': aimLt,
+        'art': aimRt,
+        'af': aimFire,
+        'tg': toggles.toList(),
+        'ga': games,
+        'tb': turbo.toList(),
+        'asp': autoSprint,
+        'gy': gyro,
+        'gs': gyroSens,
+        'gyi': gyroInvertY,
         'tilt': tilt,
         'tr': tiltRightStick,
         'ti': tiltInvert,
         'ts': tiltSens,
         'tdz': tiltDeadzone,
         'tsm': tiltSmooth,
+        'tcv': tiltCurve,
         'tc': tiltCenter,
+        'tac': tiltAuto,
       };
 
   static ProfileSettings fromJson(Object? j) {
     if (j is! Map) return ProfileSettings();
     double n(Object? v, double d) => v is num ? v.toDouble() : d;
+    double c(Object? v, double d, double lo, double hi) =>
+        n(v, d).clamp(lo, hi).toDouble();
     double sens(Object? v, Object? legacy) => n(v, n(legacy, 1))
         .clamp(LayoutStore.minSensitivity, LayoutStore.maxSensitivity)
         .toDouble();
@@ -152,23 +225,46 @@ class ProfileSettings {
       deadzoneR: dz(j['dzr'], j['dz']),
       sensL: sens(j['sl'], j['sens']),
       sensR: sens(j['sr'], j['sens']),
+      curveL: c(j['cl'], 1, LayoutStore.minCurve, LayoutStore.maxCurve),
+      curveR: c(j['cr'], 1, LayoutStore.minCurve, LayoutStore.maxCurve),
+      yScaleL: c(j['yl'], 1, LayoutStore.minYScale, LayoutStore.maxYScale),
+      yScaleR: c(j['yr'], 1, LayoutStore.minYScale, LayoutStore.maxYScale),
       floatLeft: j['fl'] == true,
       floatRight: j['fr'] == true,
       // Older versions stored a bool here.
       haptics: j['hp'] is int ? (j['hp'] as int).clamp(0, 2) : (j['hp'] == false ? 0 : 1),
+      rumble: c(j['rmb'], 1, 0.0, 1.0),
       latchLt: j['llt'] == true,
       latchRt: j['lrt'] == true,
+      latchLevelLt: c(j['llv'], 1, LayoutStore.minLatchLevel, 1.0),
+      latchLevelRt: c(j['rlv'], 1, LayoutStore.minLatchLevel, 1.0),
       steerLt: j['slt'] == true,
       steerRt: j['srt'] == true,
+      aimLt: j['alt'] == true,
+      aimRt: j['art'] == true,
+      aimFire: c(j['af'], 1.8, LayoutStore.minAimFire, LayoutStore.maxAimFire),
+      toggles: j['tg'] is List
+          ? {for (final e in j['tg'] as List) if (e is String) e}
+          : <String>{},
+      turbo: j['tb'] is List
+          ? {for (final e in j['tb'] as List) if (e is String) e}
+          : <String>{},
+      autoSprint: j['asp'] == true,
+      gyro: j['gy'] == true,
+      gyroSens: c(j['gs'], 1, LayoutStore.minTiltSens, LayoutStore.maxTiltSens),
+      gyroInvertY: j['gyi'] == true,
+      games: j['ga'] is List
+          ? [for (final e in j['ga'] as List) if (e is String) e]
+          : <String>[],
       tilt: j['tilt'] == true,
       tiltRightStick: j['tr'] == true,
       tiltInvert: j['ti'] == true,
-      tiltSens: n(j['ts'], 1)
-          .clamp(LayoutStore.minTiltSens, LayoutStore.maxTiltSens)
-          .toDouble(),
-      tiltDeadzone: n(j['tdz'], 2).clamp(0.0, LayoutStore.maxTiltDeadzone).toDouble(),
-      tiltSmooth: n(j['tsm'], 0.3).clamp(0.0, 0.9).toDouble(),
-      tiltCenter: n(j['tc'], 0).clamp(-90.0, 90.0).toDouble(),
+      tiltSens: c(j['ts'], 1, LayoutStore.minTiltSens, LayoutStore.maxTiltSens),
+      tiltDeadzone: c(j['tdz'], 2, 0.0, LayoutStore.maxTiltDeadzone),
+      tiltSmooth: c(j['tsm'], 0.3, 0.0, 0.9),
+      tiltCurve: c(j['tcv'], 1, LayoutStore.minCurve, LayoutStore.maxCurve),
+      tiltCenter: c(j['tc'], 0, -90.0, 90.0),
+      tiltAuto: j['tac'] == true,
     );
   }
 
@@ -177,21 +273,46 @@ class ProfileSettings {
         deadzoneR: deadzoneR,
         sensL: sensL,
         sensR: sensR,
+        curveL: curveL,
+        curveR: curveR,
+        yScaleL: yScaleL,
+        yScaleR: yScaleR,
         floatLeft: floatLeft,
         floatRight: floatRight,
         haptics: haptics,
+        rumble: rumble,
         latchLt: latchLt,
         latchRt: latchRt,
+        latchLevelLt: latchLevelLt,
+        latchLevelRt: latchLevelRt,
         steerLt: steerLt,
         steerRt: steerRt,
+        aimLt: aimLt,
+        aimRt: aimRt,
+        aimFire: aimFire,
+        toggles: {...toggles},
+        games: [...games],
+        turbo: {...turbo},
+        autoSprint: autoSprint,
+        gyro: gyro,
+        gyroSens: gyroSens,
+        gyroInvertY: gyroInvertY,
         tilt: tilt,
         tiltRightStick: tiltRightStick,
         tiltInvert: tiltInvert,
         tiltSens: tiltSens,
         tiltDeadzone: tiltDeadzone,
         tiltSmooth: tiltSmooth,
+        tiltCurve: tiltCurve,
         tiltCenter: tiltCenter,
+        tiltAuto: tiltAuto,
       );
+}
+
+class _Snapshot {
+  final String profile;
+  final _Profile data;
+  _Snapshot(this.profile, this.data);
 }
 
 class _Profile {
@@ -263,6 +384,13 @@ class LayoutStore extends ChangeNotifier {
   static const double minTiltSens = 0.3;
   static const double maxTiltSens = 3.0;
   static const double maxTiltDeadzone = 15.0;
+  static const double minCurve = 1.0;
+  static const double maxCurve = 3.0;
+  static const double minYScale = 0.3;
+  static const double maxYScale = 2.0;
+  static const double minLatchLevel = 0.2;
+  static const double minAimFire = 1.2;
+  static const double maxAimFire = 3.0;
 
   /// Only used to read the position of the old combined A/B/X/Y control.
   static const ItemSpec faceLegacySpec =
@@ -270,25 +398,29 @@ class LayoutStore extends ChangeNotifier {
 
   /// Default positions copied from the original fixed layout.
   static const List<ItemSpec> specs = [
-    ItemSpec('lt', 'LT trigger', 0.078, 0.182, 112, 112),
-    ItemSpec('lb', 'LB bumper', 0.184, 0.339, 70, 70),
-    ItemSpec('dpad', 'D-pad', 0.112, 0.620, 180, 180, canColor: false),
-    ItemSpec('disconnect', 'Disconnect', 0.470, 0.068, 50, 50, canHide: false),
-    ItemSpec('back', 'Back (menu)', 0.371, 0.242, 60, 60),
-    ItemSpec('guide', 'Guide', 0.470, 0.242, 68, 68),
-    ItemSpec('start', 'Start', 0.570, 0.242, 60, 60),
-    ItemSpec('l3', 'L3 (left stick click)', 0.416, 0.475, 90, 56),
-    ItemSpec('r3', 'R3 (right stick click)', 0.526, 0.475, 90, 56),
-    ItemSpec('lstick', 'Left stick', 0.310, 0.751, 160, 160,
+    // Top row: triggers in the corners, bumpers next to them.
+    ItemSpec('lt', 'LT trigger', 0.080, 0.200, 100, 100),
+    ItemSpec('lb', 'LB bumper', 0.215, 0.140, 80, 46),
+    ItemSpec('rb', 'RB bumper', 0.785, 0.140, 80, 46),
+    ItemSpec('rt', 'RT trigger', 0.920, 0.200, 100, 100),
+    // Left thumb: D-pad + left stick.
+    ItemSpec('dpad', 'D-pad', 0.115, 0.620, 180, 180, canColor: false),
+    ItemSpec('lstick', 'Left stick', 0.335, 0.745, 160, 160,
         floatW: 260, floatH: 220),
-    ItemSpec('rstick', 'Right stick', 0.685, 0.751, 160, 160,
+    // Right thumb: right stick + A/B/X/Y diamond.
+    ItemSpec('rstick', 'Right stick', 0.665, 0.745, 160, 160,
         floatW: 260, floatH: 220),
-    ItemSpec('rb', 'RB bumper', 0.815, 0.346, 70, 70),
-    ItemSpec('rt', 'RT trigger', 0.922, 0.182, 112, 112),
-    ItemSpec('btn_y', 'Y button', 0.890, 0.500, 56, 56),
-    ItemSpec('btn_a', 'A button', 0.890, 0.741, 56, 56),
-    ItemSpec('btn_x', 'X button', 0.835, 0.620, 56, 56),
-    ItemSpec('btn_b', 'B button', 0.946, 0.620, 56, 56),
+    ItemSpec('btn_y', 'Y button', 0.885, 0.455, 62, 62),
+    ItemSpec('btn_a', 'A button', 0.885, 0.745, 62, 62),
+    ItemSpec('btn_x', 'X button', 0.820, 0.600, 62, 62),
+    ItemSpec('btn_b', 'B button', 0.950, 0.600, 62, 62),
+    // Centre cluster.
+    ItemSpec('disconnect', 'Disconnect', 0.500, 0.065, 44, 44, canHide: false),
+    ItemSpec('back', 'Back (menu)', 0.405, 0.220, 56, 56),
+    ItemSpec('guide', 'Guide', 0.500, 0.220, 64, 64),
+    ItemSpec('start', 'Start', 0.595, 0.220, 56, 56),
+    ItemSpec('l3', 'L3 (left stick click)', 0.435, 0.440, 80, 44),
+    ItemSpec('r3', 'R3 (right stick click)', 0.565, 0.440, 80, 44),
   ];
 
   static final Map<String, ItemSpec> _specById = {
@@ -299,6 +431,45 @@ class LayoutStore extends ChangeNotifier {
     defaultProfileName: _Profile.defaults(),
   };
   String _active = defaultProfileName;
+
+  /// Switch profiles automatically when the PC reports a known game.
+  bool autoSwitch = false;
+
+  // ───────────── undo (editor) ─────────────
+  final List<_Snapshot> _undo = [];
+  String? _lastCheckpointGroup;
+  DateTime _lastCheckpointAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  bool get canUndo => _undo.any((s) => s.profile == _active);
+
+  /// Remembers the active profile so [undo] can bring it back. Calls with the
+  /// same [group] within 1.5 s (a slider drag, repeated nudges) count as one.
+  void checkpoint({String? group}) {
+    final now = DateTime.now();
+    if (group != null &&
+        group == _lastCheckpointGroup &&
+        now.difference(_lastCheckpointAt).inMilliseconds < 1500) {
+      _lastCheckpointAt = now;
+      return;
+    }
+    _lastCheckpointGroup = group;
+    _lastCheckpointAt = now;
+    _undo.add(_Snapshot(_active, _profiles[_active]!.copy()));
+    if (_undo.length > 40) _undo.removeAt(0);
+  }
+
+  void undo() {
+    final i = _undo.lastIndexWhere((s) => s.profile == _active);
+    if (i < 0) return;
+    _profiles[_active] = _undo.removeAt(i).data;
+    _lastCheckpointGroup = null;
+    notifyListeners();
+  }
+
+  void clearUndo() {
+    _undo.clear();
+    _lastCheckpointGroup = null;
+  }
 
   // ───────────── profiles ─────────────
   List<String> get profileNames => _profiles.keys.toList();
@@ -331,6 +502,7 @@ class LayoutStore extends ChangeNotifier {
   void createProfile(String name) {
     final n = _uniqueName(name);
     _profiles[n] = _profiles[_active]!.copy();
+    _profiles[n]!.settings.games.clear(); // a game maps to one profile only
     _active = n;
     notifyListeners();
   }
@@ -377,6 +549,7 @@ class LayoutStore extends ChangeNotifier {
       if (data is! Map || data[_shareTag] == null) return null;
       final n = _uniqueName(data['name'] is String ? data['name'] as String : 'Imported');
       _profiles[n] = _Profile.fromJson(data);
+      _profiles[n]!.settings.games.clear();
       _active = n;
       notifyListeners();
       return n;
@@ -454,6 +627,40 @@ class LayoutStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ───────────── auto-switch by game ─────────────
+  static String normApp(String s) =>
+      s.trim().toLowerCase().replaceAll(RegExp(r'\.exe$'), '');
+
+  void setAutoSwitch(bool v) {
+    autoSwitch = v;
+    notifyListeners();
+  }
+
+  /// Profile that lists [app] as one of its games, or null.
+  String? profileForApp(String app) {
+    final a = normApp(app);
+    for (final e in _profiles.entries) {
+      if (e.value.settings.games.contains(a)) return e.key;
+    }
+    return null;
+  }
+
+  /// Assigns [app] to the active profile (and removes it from any other).
+  void addGame(String app) {
+    final a = normApp(app);
+    if (a.isEmpty) return;
+    for (final p in _profiles.values) {
+      p.settings.games.remove(a);
+    }
+    settings.games.add(a);
+    notifyListeners();
+  }
+
+  void removeGame(String app) {
+    settings.games.remove(normApp(app));
+    notifyListeners();
+  }
+
   void setHaptics(int v) {
     settings.haptics = v.clamp(0, 2);
     notifyListeners();
@@ -488,6 +695,7 @@ class LayoutStore extends ChangeNotifier {
   }
 
   void resetItem(String id) {
+    checkpoint();
     final s = spec(id);
     _profiles[_active]!.items[id] = ItemLayout(x: s.x, y: s.y);
     if (id == 'lstick') settings.floatLeft = false;
@@ -497,6 +705,7 @@ class LayoutStore extends ChangeNotifier {
 
   /// Resets the active profile only.
   void resetAll() {
+    checkpoint();
     _profiles[_active] = _Profile.defaults();
     notifyListeners();
   }
@@ -517,6 +726,7 @@ class LayoutStore extends ChangeNotifier {
             _profiles
               ..clear()
               ..addAll(loaded);
+            autoSwitch = data['auto'] == true;
             final a = data['active'];
             _active = (a is String && _profiles.containsKey(a))
                 ? a
@@ -556,6 +766,7 @@ class LayoutStore extends ChangeNotifier {
         _prefsKey,
         jsonEncode({
           'active': _active,
+          'auto': autoSwitch,
           'profiles': {for (final e in _profiles.entries) e.key: e.value.toJson()},
         }),
       );

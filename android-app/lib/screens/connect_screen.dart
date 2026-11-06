@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../network/gamepad_socket.dart';
+import '../network/player_name.dart';
 import '../network/protocol.dart';
 import '../network/saved_hosts.dart';
 import '../theme.dart';
@@ -33,6 +34,7 @@ class ConnectScreen extends StatefulWidget {
 class _ConnectScreenState extends State<ConnectScreen> with WidgetsBindingObserver {
   final GamepadSocket _socket = GamepadSocket();
   final TextEditingController _ipController = TextEditingController();
+  final TextEditingController _nameController = TextEditingController();
 
   final Map<String, DiscoveredHost> _found = {};
   final Map<String, DateTime> _lastSeen = {};
@@ -62,6 +64,9 @@ class _ConnectScreenState extends State<ConnectScreen> with WidgetsBindingObserv
 
     _discoverSub = _socket.discoveredStream.listen(_onHost);
     _statusSub = _socket.statusStream.listen(_onStatus);
+    PlayerName.load().then((n) {
+      if (mounted) _nameController.text = n;
+    });
     _loadRecent();
     _startDiscovery();
   }
@@ -74,6 +79,7 @@ class _ConnectScreenState extends State<ConnectScreen> with WidgetsBindingObserv
     _statusSub?.cancel();
     _socket.dispose();
     _ipController.dispose();
+    _nameController.dispose();
     super.dispose();
   }
 
@@ -231,7 +237,9 @@ class _ConnectScreenState extends State<ConnectScreen> with WidgetsBindingObserv
     });
 
     try {
-      await _socket.connect(ip, deviceName: 'Phone');
+      final player = PlayerName.clean(_nameController.text);
+      await PlayerName.save(player);
+      await _socket.connect(ip, deviceName: player);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -316,8 +324,22 @@ class _ConnectScreenState extends State<ConnectScreen> with WidgetsBindingObserv
                   children: [
                     _Header(onEditLayout: _openEditor),
                     const SizedBox(height: 18),
-                    _EditorTile(onTap: _openEditor),
-                    const SizedBox(height: 26),
+                    IntrinsicHeight(
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(
+                            child: _PlayerNameCard(
+                              controller: _nameController,
+                              onChanged: (v) => PlayerName.save(v),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          _EditorTile(onTap: _openEditor),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 24),
                     _SectionHeader(
                       title: 'Your PCs',
                       trailing: _ScanStatus(
@@ -417,55 +439,144 @@ class _Glass extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Neon gradient outline (flat colour for warnings/errors) around a dark panel.
+    final Gradient? frame = borderColor == null
+        ? const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [AppColors.activeAccent, Color(0x2200F0FF), AppColors.accent],
+          )
+        : null;
     return Container(
-      padding: padding,
-      decoration: BoxDecoration(
-        color: AppColors.card,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: borderColor ?? AppColors.cardBorder),
+      padding: const EdgeInsets.all(1.3),
+      decoration: ShapeDecoration(
+        gradient: frame,
+        color: frame == null ? borderColor : null,
+        shape: hudShape(border: Colors.transparent, cut: 15),
+        shadows: [
+          BoxShadow(
+              color: (borderColor ?? AppColors.activeAccent).withOpacity(0.10),
+              blurRadius: 18),
+        ],
       ),
-      child: child,
+      child: Container(
+        padding: padding,
+        decoration: ShapeDecoration(
+          color: const Color(0xEB0A0D1F),
+          shape: hudShape(border: Colors.transparent, cut: 14),
+        ),
+        child: child,
+      ),
     );
   }
 }
 
-class _Header extends StatelessWidget {
+class _Header extends StatefulWidget {
   final VoidCallback onEditLayout;
   const _Header({required this.onEditLayout});
+
+  @override
+  State<_Header> createState() => _HeaderState();
+}
+
+class _HeaderState extends State<_Header> with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse =
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 2400))
+        ..repeat();
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Container(
-          width: 54,
-          height: 54,
-          decoration: BoxDecoration(
-            gradient: AppColors.accentGradient,
-            borderRadius: BorderRadius.circular(16),
-            boxShadow: [
-              BoxShadow(
-                  color: AppColors.accent.withOpacity(0.3),
-                  blurRadius: 18,
-                  offset: const Offset(0, 6)),
+        SizedBox(
+          width: 72,
+          height: 72,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              // Expanding neon ring behind the logo.
+              AnimatedBuilder(
+                animation: _pulse,
+                builder: (context, _) {
+                  final t = _pulse.value;
+                  return Opacity(
+                    opacity: (1 - t) * 0.6,
+                    child: Transform.scale(
+                      scale: 1 + 0.3 * t,
+                      child: Container(
+                        width: 56,
+                        height: 56,
+                        decoration: ShapeDecoration(
+                          shape: hudShape(border: AppColors.activeAccent, cut: 16, width: 2),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+              Container(
+                width: 56,
+                height: 56,
+                decoration: ShapeDecoration(
+                  gradient: AppColors.accentGradient,
+                  shape: hudShape(border: Colors.white24, cut: 16),
+                  shadows: [
+                    BoxShadow(
+                        color: AppColors.accent.withOpacity(0.5),
+                        blurRadius: 24,
+                        offset: const Offset(0, 6)),
+                  ],
+                ),
+                child: const Icon(Icons.sports_esports, color: Colors.white, size: 34),
+              ),
             ],
           ),
-          child: const Icon(Icons.sports_esports, color: Colors.white, size: 34),
         ),
-        const SizedBox(width: 14),
+        const SizedBox(width: 10),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('Virtual Gamepad',
-                  style: TextStyle(
-                      color: Colors.white, fontSize: 21, fontWeight: FontWeight.w800)),
-              const SizedBox(height: 2),
-              Text('Turn your phone into a PC controller',
-                  style: TextStyle(
-                      color: Colors.white.withOpacity(0.7),
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w500)),
+              ShaderMask(
+                blendMode: BlendMode.srcIn,
+                shaderCallback: (rect) => const LinearGradient(
+                  colors: [Colors.white, AppColors.activeAccent, AppColors.accent],
+                ).createShader(rect),
+                child: Text('VIRTUAL GAMEPAD',
+                    style: AppFonts.display(const TextStyle(
+                        color: Colors.white,
+                        fontSize: 22,
+                        letterSpacing: 1.4,
+                        fontWeight: FontWeight.w800))),
+              ),
+              const SizedBox(height: 3),
+              Row(
+                children: [
+                  Container(
+                    width: 7,
+                    height: 7,
+                    decoration: const BoxDecoration(
+                        color: AppColors.success, shape: BoxShape.circle),
+                  ),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Text('PHONE  →  PC CONTROLLER',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            color: AppColors.activeAccent.withOpacity(0.85),
+                            fontSize: 12.5,
+                            letterSpacing: 1.6,
+                            fontWeight: FontWeight.w600)),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
@@ -481,49 +592,30 @@ class _EditorTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final shape = hudShape(border: AppColors.activeAccent.withOpacity(0.5), cut: 14);
     return Material(
       color: Colors.transparent,
       child: InkWell(
-        borderRadius: BorderRadius.circular(20),
+        customBorder: shape,
         onTap: onTap,
         child: Ink(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(20),
-            gradient: LinearGradient(colors: [
-              AppColors.iconBg.withOpacity(0.35),
-              AppColors.accent.withOpacity(0.18),
-            ]),
-            border: Border.all(color: AppColors.cardBorder),
+          width: 84,
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: ShapeDecoration(
+            color: AppColors.activeAccent.withOpacity(0.10),
+            shape: shape,
           ),
-          child: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.12),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: const Icon(Icons.tune_rounded, color: Colors.white),
-              ),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('Customize controller',
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 15)),
-                    SizedBox(height: 2),
-                    Text('Move and resize buttons, colors, vibration, profiles',
-                        style: TextStyle(color: AppColors.textDim, fontSize: 12)),
-                  ],
-                ),
-              ),
-              Icon(Icons.chevron_right_rounded, color: Colors.white.withOpacity(0.7)),
+              const Icon(Icons.tune_rounded, color: AppColors.activeAccent, size: 26),
+              const SizedBox(height: 4),
+              Text('LAYOUT',
+                  style: AppFonts.display(const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.2))),
             ],
           ),
         ),
@@ -541,12 +633,12 @@ class _SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Text(title,
-            style: const TextStyle(
+        Text(title.toUpperCase(),
+            style: AppFonts.display(const TextStyle(
                 color: Colors.white,
-                fontSize: 15,
+                fontSize: 13,
                 fontWeight: FontWeight.w700,
-                letterSpacing: 0.3)),
+                letterSpacing: 1.3))),
         const Spacer(),
         if (trailing != null) trailing!,
       ],
@@ -815,6 +907,40 @@ class _HostCard extends StatelessWidget {
   }
 }
 
+class _PlayerNameCard extends StatelessWidget {
+  final TextEditingController controller;
+  final ValueChanged<String> onChanged;
+  const _PlayerNameCard({required this.controller, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return _Glass(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      child: Row(
+        children: [
+          const Icon(Icons.badge_rounded, color: Colors.white70, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: TextField(
+              controller: controller,
+              maxLength: PlayerName.maxLength,
+              textInputAction: TextInputAction.done,
+              onChanged: onChanged,
+              style: const TextStyle(color: Colors.white, fontSize: 16),
+              decoration: InputDecoration(
+                labelText: 'PLAYER NAME',
+                labelStyle: TextStyle(color: Colors.white.withOpacity(0.6)),
+                counterText: '',
+                border: InputBorder.none,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _ManualEntryCard extends StatelessWidget {
   final TextEditingController controller;
   final bool connecting;
@@ -874,40 +1000,79 @@ class _ManualEntryCard extends StatelessWidget {
   }
 }
 
-class _GradientButton extends StatelessWidget {
+class _GradientButton extends StatefulWidget {
   final String label;
   final bool loading;
   final VoidCallback? onPressed;
   const _GradientButton({required this.label, required this.loading, required this.onPressed});
 
   @override
+  State<_GradientButton> createState() => _GradientButtonState();
+}
+
+class _GradientButtonState extends State<_GradientButton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _glow =
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 1600))
+        ..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _glow.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final enabled = onPressed != null;
+    final enabled = widget.onPressed != null;
+    final shape = hudShape(border: Colors.white30, cut: 14);
     return AnimatedOpacity(
       duration: const Duration(milliseconds: 200),
-      opacity: enabled || loading ? 1 : 0.45,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(30),
-          onTap: onPressed,
-          child: Ink(
-            height: 50,
-            decoration: BoxDecoration(
-              gradient: AppColors.accentGradient,
-              borderRadius: BorderRadius.circular(30),
-            ),
-            child: Center(
-              child: loading
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : Text(label,
-                      style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 1.2,
-                          color: Colors.white)),
+      opacity: enabled || widget.loading ? 1 : 0.45,
+      child: AnimatedBuilder(
+        animation: _glow,
+        builder: (context, child) => DecoratedBox(
+          decoration: ShapeDecoration(
+            shape: shape,
+            shadows: enabled
+                ? [
+                    BoxShadow(
+                        color: AppColors.accent.withOpacity(0.25 + 0.25 * _glow.value),
+                        blurRadius: 14 + 12 * _glow.value,
+                        offset: const Offset(0, 4)),
+                  ]
+                : null,
+          ),
+          child: child,
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            customBorder: shape,
+            onTap: widget.onPressed,
+            child: Ink(
+              height: 52,
+              decoration: ShapeDecoration(gradient: AppColors.accentGradient, shape: shape),
+              child: Center(
+                child: widget.loading
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.bolt_rounded, color: Colors.white, size: 20),
+                          const SizedBox(width: 6),
+                          Text(widget.label,
+                              style: AppFonts.display(const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 15,
+                                  letterSpacing: 1.8,
+                                  color: Colors.white))),
+                        ],
+                      ),
+              ),
             ),
           ),
         ),

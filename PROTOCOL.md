@@ -23,6 +23,8 @@ Packets with the wrong magic byte are silently dropped.
 | 5    | DISCOVER_RESPONSE | PC -> phone (unicast)   |
 | 6    | HELLO_ACK         | PC -> phone     |
 | 7    | GOODBYE           | phone -> PC     |
+| 8    | ACTIVE_APP        | PC -> phone     |
+| 9    | RUMBLE            | PC -> phone     |
 
 ### INPUT (type 1) — 18 bytes total
 
@@ -80,6 +82,30 @@ Just the 2-byte header. Sent by the phone if no INPUT packet has gone out for
 
 Just the 2-byte header. Sent when the phone disconnects cleanly so the PC can
 immediately dispose of the virtual controller instead of waiting for timeout.
+
+### ACTIVE_APP (type 8)
+
+| Offset | Size | Field       |
+|--------|------|-------------|
+| 2      | 1    | nameLen (n) |
+| 3      | n    | processName (UTF-8, foreground app's process name without `.exe`) |
+
+Sent by the PC to every connected phone when the foreground application
+changes, re-sent every ~3 s (UDP can drop packets) and once right after
+HELLO_ACK. The phone may use it to switch layout profiles automatically.
+The host's own window is never reported. Older apps ignore this packet.
+
+### RUMBLE (type 9) — 4 bytes total
+
+| Offset | Size | Field        |
+|--------|------|--------------|
+| 2      | 1    | largeMotor (0-255, heavy / low frequency)  |
+| 3      | 1    | smallMotor (0-255, light / high frequency) |
+
+Sent by the PC when a game sets rumble on the virtual Xbox 360 controller, and
+re-sent every ~150 ms while either motor is non-zero (UDP can drop packets).
+`0, 0` means stop. The phone also stops by itself if no RUMBLE packet arrives
+for ~450 ms. Older apps ignore this packet.
 
 ### DISCOVER (type 4)
 

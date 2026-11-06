@@ -51,19 +51,9 @@ class _DpadWidgetState extends State<DpadWidget> {
       onPanUpdate: (d) => _update(d.localPosition),
       onPanEnd: (_) => _reset(),
       onPanCancel: _reset,
-      child: Container(
+      child: SizedBox(
         width: s,
         height: s,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.35),
-              blurRadius: 12,
-              offset: const Offset(0, 6),
-            ),
-          ],
-        ),
         child: CustomPaint(
           painter: _DpadPainter(up: up, down: down, left: left, right: right),
         ),
@@ -78,42 +68,100 @@ class _DpadPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final center = size.center(Offset.zero);
-    final radius = size.width / 2;
+    final c = size.center(Offset.zero);
+    final r = size.width / 2;
+    final armLen = r * 0.96; // half-length of each arm
+    final armW = r * 0.60;
+    final corner = Radius.circular(armW * 0.30);
 
-    // 1. Draw Outer Tactile Rim
-    final rimPaint = Paint()
-      ..shader = LinearGradient(
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-        colors: [
-          Colors.white.withOpacity(0.15),
-          Colors.black.withOpacity(0.4),
-        ],
-      ).createShader(Rect.fromCircle(center: center, radius: radius));
-    canvas.drawCircle(center, radius, rimPaint);
+    final horiz = RRect.fromRectAndRadius(
+        Rect.fromCenter(center: c, width: armLen * 2, height: armW), corner);
+    final vert = RRect.fromRectAndRadius(
+        Rect.fromCenter(center: c, width: armW, height: armLen * 2), corner);
+    final cross = Path.combine(
+        PathOperation.union, Path()..addRRect(horiz), Path()..addRRect(vert));
 
-    // 2. Draw Main D-pad Body (Slightly smaller than rim)
-  final bodyRadius = radius * 0.92;
-    final bodyPaint = Paint()
-      ..color = AppColors.stickFill 
-      ..style = PaintingStyle.fill;
-    canvas.drawCircle(center, bodyRadius, bodyPaint);
+    // Drop shadow.
+    canvas.drawPath(
+      cross.shift(const Offset(0, 5)),
+      Paint()
+        ..color = Colors.black.withOpacity(0.45)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8),
+    );
 
-    // 3. Arrow Calculations & Geometry
-    final arrowSize = radius * 0.22;
-    final offset = radius * 0.62;
+    // Body.
+    final bounds = Rect.fromCircle(center: c, radius: r);
+    canvas.drawPath(
+      cross,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color.lerp(AppColors.stickFill, Colors.white, 0.18)!,
+            AppColors.stickFill,
+            Color.lerp(AppColors.stickFill, Colors.black, 0.4)!,
+          ],
+        ).createShader(bounds),
+    );
 
-    _drawDirectionalArrow(canvas, center - Offset(0, offset), arrowSize, _Dir.up, up);
-    _drawDirectionalArrow(canvas, center + Offset(0, offset), arrowSize, _Dir.down, down);
-    _drawDirectionalArrow(canvas, center - Offset(offset, 0), arrowSize, _Dir.left, left);
-    _drawDirectionalArrow(canvas, center + Offset(offset, 0), arrowSize, _Dir.right, right);
+    // Pressed arms glow (clipped to the cross).
+    canvas.save();
+    canvas.clipPath(cross);
+    final glow = Paint()
+      ..color = AppColors.activeAccent.withOpacity(0.55)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10);
+    if (up) {
+      canvas.drawRect(
+          Rect.fromLTRB(c.dx - armW / 2, c.dy - armLen, c.dx + armW / 2, c.dy - armW * 0.2), glow);
+    }
+    if (down) {
+      canvas.drawRect(
+          Rect.fromLTRB(c.dx - armW / 2, c.dy + armW * 0.2, c.dx + armW / 2, c.dy + armLen), glow);
+    }
+    if (left) {
+      canvas.drawRect(
+          Rect.fromLTRB(c.dx - armLen, c.dy - armW / 2, c.dx - armW * 0.2, c.dy + armW / 2), glow);
+    }
+    if (right) {
+      canvas.drawRect(
+          Rect.fromLTRB(c.dx + armW * 0.2, c.dy - armW / 2, c.dx + armLen, c.dy + armW / 2), glow);
+    }
+    canvas.restore();
+
+    // Rim light.
+    canvas.drawPath(
+      cross,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2
+        ..color = Colors.white.withOpacity(0.28),
+    );
+
+    // Centre dimple.
+    canvas.drawCircle(c, armW * 0.28, Paint()..color = Colors.black.withOpacity(0.28));
+    canvas.drawCircle(
+      c,
+      armW * 0.28,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5
+        ..color = Colors.white.withOpacity(0.15),
+    );
+
+    // Arrows.
+    final arrowSize = r * 0.17;
+    final offset = r * 0.62;
+    _drawDirectionalArrow(canvas, c - Offset(0, offset), arrowSize, _Dir.up, up);
+    _drawDirectionalArrow(canvas, c + Offset(0, offset), arrowSize, _Dir.down, down);
+    _drawDirectionalArrow(canvas, c - Offset(offset, 0), arrowSize, _Dir.left, left);
+    _drawDirectionalArrow(canvas, c + Offset(offset, 0), arrowSize, _Dir.right, right);
   }
 
   void _drawDirectionalArrow(Canvas canvas, Offset center, double s, _Dir dir, bool isActive) {
     // Active states glow vividly; idle states are clean, muted semi-transparents
     final arrowPaint = Paint()
-      ..color = isActive ? AppColors.activeAccent : Colors.white.withOpacity(0.25)
+      ..color = isActive ? Colors.white : Colors.white.withOpacity(0.35)
       ..style = PaintingStyle.fill
       ..maskFilter = isActive ? const MaskFilter.blur(BlurStyle.solid, 2) : null;
 

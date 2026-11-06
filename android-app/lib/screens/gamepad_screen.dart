@@ -3,18 +3,22 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:sensors_plus/sensors_plus.dart';
+import '../network/rumble_player.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/gamepad_state.dart';
 import '../models/layout_store.dart';
 import '../network/gamepad_socket.dart';
+import '../network/player_name.dart';
 import '../network/protocol.dart';
 import '../theme.dart';
 import '../widgets/dpad_widget.dart';
 import '../widgets/floating_joystick_widget.dart';
 import '../widgets/gamepad_button_widget.dart';
 import '../widgets/joystick_widget.dart';
+import '../widgets/app_background.dart';
 import '../widgets/trigger_widget.dart';
+import 'layout_editor.dart';
 
 class GamepadScreen extends StatefulWidget {
   /// The live connection. Null in [editorOnly] mode.
@@ -33,6 +37,10 @@ class _GamepadScreenState extends State<GamepadScreen> {
   late final GamepadState _state;
   GamepadSocket? _ownSocket; // throwaway socket for the offline editor
   StreamSubscription? _connectionSubscription; // Handles the socket listener state
+  StreamSubscription<String>? _appSub; // PC foreground-app reports
+  StreamSubscription<List<int>>? _rumbleSub; // game rumble from the PC
+  final RumblePlayer _rumble = RumblePlayer();
+  String? _lastApp; // last app the PC reported
 
   // Track D-pad states to only vibrate when a direction is freshly clicked down
   bool _upPressed = false;
@@ -55,15 +63,23 @@ class _GamepadScreenState extends State<GamepadScreen> {
   Offset? _dragRaw; // finger-accurate centre while dragging
   static const double _grid = 20;
   String? _selected;
-  int _panelTab = 0; // 0 = general, 1 = tilt
+  double? _guideX, _guideY; // alignment guides shown while dragging
 
   // Tilt steering
   StreamSubscription<AccelerometerEvent>? _accelSub;
+  StreamSubscription<GyroscopeEvent>? _gyroSub;
+  double _fz = 0; // smoothed accelerometer z (gravity direction for gyro aim)
+  bool _autoSprintOn = false;
   final ValueNotifier<double> _tiltPreview = ValueNotifier(0);
   double _fx = 0, _fy = 0; // smoothed accelerometer x / y
   bool _fInit = false;
   double _orient = 1; // +1 / -1: landscape-left vs landscape-right
   double _tiltAngle = 0; // current wheel angle in degrees (+ = clockwise)
+  DateTime? _calUntil; // auto-centre window end
+  double _calS = 0, _calC = 0; // running sin / cos sums for the average angle
+
+  bool _tg(String id) => _layout.settings.toggles.contains(id);
+  bool _tb(String id) => _layout.settings.turbo.contains(id);
 
   @override
   void initState() {
@@ -75,6 +91,10 @@ class _GamepadScreenState extends State<GamepadScreen> {
     } else {
       _state.start();
     }
+    _appSub = widget.socket?.activeAppStream.listen(_onActiveApp);
+    _rumble.init();
+    _rumbleSub = widget.socket?.rumbleStream
+        .listen((m) => _rumble.update(m[0], m[1], _layout.settings.rumble));
     _layout.addListener(_syncTilt);
     _layout.load();
     WakelockPlus.enable();
@@ -96,6 +116,10 @@ class _GamepadScreenState extends State<GamepadScreen> {
   void dispose() {
     _connectionSubscription?.cancel(); // Cancel network listeners to prevent memory leaks
     _accelSub?.cancel();
+    _gyroSub?.cancel();
+    _appSub?.cancel();
+    _rumbleSub?.cancel();
+    _rumble.dispose();
     _tiltPreview.dispose();
     _state.stop();
     _layout.save();
@@ -136,19 +160,76 @@ class _GamepadScreenState extends State<GamepadScreen> {
 
   Color _colorOr(String id, Color fallback) => _colorOf(id) ?? fallback;
 
+  // ───────────────────── Auto profile by game ─────────────────────
+
+  void _onActiveApp(String app) {
+    final changed = app != _lastApp;
+    _lastApp = app;
+    if (changed && _editing && mounted) setState(() {}); // refresh "Add <game>"
+    _applyAutoProfile();
+  }
+
+  void _applyAutoProfile() {
+    final app = _lastApp;
+    if (app == null || !_layout.autoSwitch || _editing) return;
+    final target = _layout.profileForApp(app);
+    if (target == null || target == _layout.active) return;
+    _releaseAll();
+    _layout.switchTo(target);
+    _layout.save();
+    _toast('Profile: $target');
+  }
+
+  void _addGame(String name) {
+    _layout.addGame(name);
+    _layout.save();
+    _toast('"${LayoutStore.normApp(name)}" → profile "${_layout.active}"');
+  }
+
   /// Releases everything held on the PC and resets local haptic trackers.
   void _releaseAll() {
     _state.releaseAll();
     _leftTriggerStep = _rightTriggerStep = 0;
     _leftStickActive = _rightStickActive = false;
+    _autoSprintOn = false;
   }
 
   // ───────────────────────── Tilt steering ─────────────────────────
 
+  /// Averages the wheel angle for one second and uses it as "straight".
+  void _beginAutoCal() {
+    if (!_layout.settings.tiltAuto) return;
+    _calUntil = DateTime.now().add(const Duration(seconds: 1));
+    _calS = 0;
+    _calC = 0;
+  }
+
   void _syncTilt() {
-    final want = _layout.settings.tilt;
+    final cfg = _layout.settings;
+    final wantGyro = cfg.gyro;
+    if (wantGyro && _gyroSub == null) {
+      try {
+        _gyroSub = gyroscopeEventStream(samplingPeriod: SensorInterval.gameInterval)
+            .listen(_onGyro, onError: (_) {
+          _gyroSub?.cancel();
+          _gyroSub = null;
+          _toast('Gyroscope not available on this device');
+        });
+      } catch (_) {
+        _gyroSub = null;
+        _toast('Gyroscope not available on this device');
+      }
+    } else if (!wantGyro && _gyroSub != null) {
+      _gyroSub!.cancel();
+      _gyroSub = null;
+      _state.gyroRx = _state.gyroRy = null;
+    }
+
+    // The accelerometer serves tilt steering and (for gravity) gyro aiming.
+    final want = cfg.tilt || cfg.gyro;
     if (want && _accelSub == null) {
       _fInit = false;
+      _beginAutoCal();
       try {
         _accelSub = accelerometerEventStream(samplingPeriod: SensorInterval.gameInterval)
             .listen(_onAccel, onError: (_) {
@@ -175,11 +256,13 @@ class _GamepadScreenState extends State<GamepadScreen> {
     if (!_fInit) {
       _fx = e.x;
       _fy = e.y;
+      _fz = e.z;
       _fInit = true;
     } else {
       final k = 1.0 - st.tiltSmooth;
       _fx += (e.x - _fx) * k;
       _fy += (e.y - _fy) * k;
+      _fz += (e.z - _fz) * k;
     }
 
     double steer = 0;
@@ -188,6 +271,19 @@ class _GamepadScreenState extends State<GamepadScreen> {
       if (_fx.abs() > 4.0) _orient = _fx >= 0 ? 1.0 : -1.0; // landscape L/R
       final deg = math.atan2(_fy * _orient, _fx * _orient) * 180 / math.pi;
       _tiltAngle = deg;
+
+      final until = _calUntil;
+      if (until != null) {
+        if (DateTime.now().isBefore(until)) {
+          final rad = deg * math.pi / 180;
+          _calS += math.sin(rad);
+          _calC += math.cos(rad);
+          st.tiltCenter = math.atan2(_calS, _calC) * 180 / math.pi;
+        } else {
+          _calUntil = null;
+          _layout.save();
+        }
+      }
 
       var d = deg - st.tiltCenter;
       if (d > 180) d -= 360;
@@ -199,10 +295,16 @@ class _GamepadScreenState extends State<GamepadScreen> {
       if (full < dz + 1) full = dz + 1;
       final m = d.abs();
       if (m > dz) {
-        steer = ((m - dz) / (full - dz)).clamp(0.0, 1.0).toDouble() * (d < 0 ? -1.0 : 1.0);
+        final t = ((m - dz) / (full - dz)).clamp(0.0, 1.0).toDouble();
+        steer = math.pow(t, st.tiltCurve).toDouble() * (d < 0 ? -1.0 : 1.0);
       }
     }
 
+    if (!st.tilt) {
+      // Sensor is only running for gyro aiming.
+      _state.tiltLx = _state.tiltRx = null;
+      return;
+    }
     _tiltPreview.value = steer;
     if (_editing || widget.editorOnly) {
       _state.tiltLx = _state.tiltRx = null;
@@ -226,6 +328,47 @@ class _GamepadScreenState extends State<GamepadScreen> {
     final v = _shape(x, y, left: false);
     _state.trigRx = v[0];
     _state.trigRy = v[1];
+  }
+
+  /// Gyro aiming: turning the phone moves the right stick. Yaw is measured
+  /// around the true vertical axis (from gravity) so it works at any hold angle.
+  void _onGyro(GyroscopeEvent e) {
+    final st = _layout.settings;
+    if (!st.gyro || _editing || widget.editorOnly) {
+      _state.gyroRx = _state.gyroRy = null;
+      return;
+    }
+    final g = math.sqrt(_fx * _fx + _fy * _fy + _fz * _fz);
+    if (g < 5.0) return; // no gravity reading yet
+    final yaw = (_fx * e.x + _fy * e.y + _fz * e.z) / g; // rad/s, CCW positive
+    final pitch = -e.y * _orient; // pointing up = positive
+
+    double dead(double r) {
+      const dz = 0.05; // ignore hand tremor
+      final m = r.abs();
+      return m < dz ? 0.0 : (m - dz) * (r < 0 ? -1.0 : 1.0);
+    }
+
+    final k = 0.5 * st.gyroSens; // full stick at ~2 rad/s with sensitivity 1
+    _state.gyroRx = (-dead(yaw) * k).clamp(-1.0, 1.0).toDouble();
+    _state.gyroRy =
+        (dead(pitch) * k * (st.gyroInvertY ? -1.0 : 1.0)).clamp(-1.0, 1.0).toDouble();
+  }
+
+  /// Auto-sprint: click L3 while the left stick is held fully forward.
+  void _updateAutoSprint(double x, double y) {
+    if (!_layout.settings.autoSprint) {
+      if (_autoSprintOn) {
+        _autoSprintOn = false;
+        _state.setButton(Protocol.bitLsClick, false);
+      }
+      return;
+    }
+    final m = math.sqrt(x * x + y * y);
+    final want = _autoSprintOn ? (m > 0.8 && y > 0.3) : (m > 0.95 && y > 0.5);
+    if (want == _autoSprintOn) return;
+    _autoSprintOn = want;
+    _state.setButton(Protocol.bitLsClick, want);
   }
 
   void _calibrateTilt() {
@@ -322,6 +465,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
   void _enterEdit() {
     HapticFeedback.selectionClick();
     _releaseAll(); // nothing stays "held" on the PC while editing
+    _layout.clearUndo();
     setState(() {
       _editing = true;
       _selected = null;
@@ -338,6 +482,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
       _editing = false;
       _selected = null;
     });
+    _beginAutoCal();
   }
 
   /// Centre of a control in pixels, kept fully inside the play area.
@@ -361,9 +506,38 @@ class _GamepadScreenState extends State<GamepadScreen> {
     raw = _clampCenter(id, c, raw.dx, raw.dy);
     _dragRaw = raw;
     var t = raw;
+    _guideX = _guideY = null;
     if (_snap) {
       t = _clampCenter(id, c, (raw.dx / _grid).round() * _grid,
           (raw.dy / _grid).round() * _grid);
+    } else {
+      // Magnet guides: line up with the screen centre and other controls.
+      const tol = 7.0;
+      double bestX = tol, bestY = tol;
+      double? gx, gy;
+      void consider(double ox, double oy) {
+        final dx = (raw.dx - ox).abs();
+        final dy = (raw.dy - oy).abs();
+        if (dx < bestX) {
+          bestX = dx;
+          gx = ox;
+        }
+        if (dy < bestY) {
+          bestY = dy;
+          gy = oy;
+        }
+      }
+
+      consider(c.maxWidth / 2, c.maxHeight / 2);
+      for (final s in LayoutStore.specs) {
+        if (s.id == id || !_layout.of(s.id).visible) continue;
+        final o = _center(s.id, c);
+        consider(o.dx, o.dy);
+      }
+      t = Offset(gx ?? raw.dx, gy ?? raw.dy);
+      _guideX = gx;
+      _guideY = gy;
+      t = _clampCenter(id, c, t.dx, t.dy);
     }
     _layout.setPosition(id, t.dx / c.maxWidth, t.dy / c.maxHeight);
   }
@@ -372,7 +546,17 @@ class _GamepadScreenState extends State<GamepadScreen> {
   /// frozen and the whole box becomes draggable / selectable.
   Widget _item(String id, BoxConstraints c, Widget child) {
     final it = _layout.of(id);
-    if (!it.visible && !_editing) return const SizedBox.shrink();
+    // Must stay a Positioned: a plain non-positioned child makes the Stack
+    // collapse to 0x0 and every other control vanishes.
+    if (!it.visible && !_editing) {
+      return const Positioned(
+        left: 0,
+        top: 0,
+        width: 0,
+        height: 0,
+        child: SizedBox.shrink(),
+      );
+    }
 
     final bw = _layout.boxW(id);
     final bh = _layout.boxH(id);
@@ -385,7 +569,16 @@ class _GamepadScreenState extends State<GamepadScreen> {
     // FittedBox scales the control AND its hit area together.
     final content = FittedBox(
       fit: BoxFit.contain,
-      child: SizedBox(width: bw, height: bh, child: Center(child: child)),
+      child: SizedBox(
+          width: bw,
+          height: bh,
+          child: Center(
+            child: KeyedSubtree(
+              key: ValueKey('$id|${_layout.active}|${_tg(id)}|${_tb(id)}'),
+              child: child,
+            ),
+          ),
+        ),
     );
 
     if (!_editing) {
@@ -407,16 +600,23 @@ class _GamepadScreenState extends State<GamepadScreen> {
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTapDown: (_) => setState(() => _selected = id),
-        onPanStart: (_) => setState(() {
-          _selected = id;
-          _dragRaw = _center(id, c);
-        }),
+        onPanStart: (_) {
+          _layout.checkpoint();
+          setState(() {
+            _selected = id;
+            _dragRaw = _center(id, c);
+          });
+        },
         onPanUpdate: (d) => _drag(id, d.delta, c),
         onPanEnd: (_) {
           _dragRaw = null;
+          setState(() => _guideX = _guideY = null);
           _layout.save();
         },
-        onPanCancel: () => _dragRaw = null,
+        onPanCancel: () {
+          _dragRaw = null;
+          setState(() => _guideX = _guideY = null);
+        },
         child: Stack(
           children: [
             Opacity(
@@ -429,9 +629,16 @@ class _GamepadScreenState extends State<GamepadScreen> {
                   decoration: BoxDecoration(
                     border: Border.all(
                       color: selected ? AppColors.activeAccent : Colors.white38,
-                      width: selected ? 2 : 1,
+                      width: selected ? 2.5 : 1,
                     ),
                     borderRadius: BorderRadius.circular(10),
+                    boxShadow: selected
+                        ? [
+                            BoxShadow(
+                                color: AppColors.activeAccent.withOpacity(0.45),
+                                blurRadius: 12)
+                          ]
+                        : null,
                   ),
                 ),
               ),
@@ -442,18 +649,26 @@ class _GamepadScreenState extends State<GamepadScreen> {
     );
   }
 
-  /// Applies that stick's deadzone + sensitivity to a raw stick vector.
+  /// Applies that stick's deadzone, curve, sensitivity and Y gain to a raw
+  /// stick vector.
   List<double> _shape(double x, double y, {required bool left}) {
     final s = _layout.settings;
     final dz = left ? s.deadzoneL : s.deadzoneR;
     final gain = left ? s.sensL : s.sensR;
+    final curve = left ? s.curveL : s.curveR;
+    final yGain = left ? s.yScaleL : s.yScaleR;
     final m = math.sqrt(x * x + y * y);
     if (m <= dz || m == 0) return const [0.0, 0.0];
-    final scaled = (((m - dz) / (1 - dz)) * gain).clamp(0.0, 1.0).toDouble();
-    return [x / m * scaled, y / m * scaled];
+    final t = ((m - dz) / (1 - dz)).clamp(0.0, 1.0).toDouble();
+    final scaled = (math.pow(t, curve).toDouble() * gain).clamp(0.0, 1.0).toDouble();
+    return [
+      (x / m * scaled).clamp(-1.0, 1.0).toDouble(),
+      (y / m * scaled * yGain).clamp(-1.0, 1.0).toDouble(),
+    ];
   }
 
-  Future<String?> _askName(String title, String initial) async {
+  Future<String?> _askName(String title, String initial,
+      {String hint = 'Profile name'}) async {
     final ctrl = TextEditingController(text: initial);
     final r = await showDialog<String>(
       context: context,
@@ -462,8 +677,8 @@ class _GamepadScreenState extends State<GamepadScreen> {
         content: TextField(
           controller: ctrl,
           autofocus: true,
-          maxLength: 20,
-          decoration: const InputDecoration(hintText: 'Profile name'),
+          maxLength: 40,
+          decoration: InputDecoration(hintText: hint),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
@@ -477,181 +692,14 @@ class _GamepadScreenState extends State<GamepadScreen> {
     return (r == null || r.isEmpty) ? null : r;
   }
 
-  Future<void> _confirmDeleteProfile() async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('Delete "${_layout.active}"?'),
-        content: const Text('This profile and its layout will be removed.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Delete')),
-        ],
-      ),
-    );
-    if (ok == true) {
-      _layout.deleteActive();
-      _layout.save();
-    }
-  }
-
-  Widget _sliderRow(String label, double value, double min, double max,
-      ValueChanged<double> onChanged,
-      {String Function(double v)? fmt, double labelWidth = 52, double valueWidth = 40}) {
-    return Row(
-      children: [
-        SizedBox(
-          width: labelWidth,
-          child: Text(label, style: const TextStyle(color: Colors.white70, fontSize: 12)),
-        ),
-        Expanded(
-          child: SliderTheme(
-            data: SliderTheme.of(context).copyWith(
-              trackHeight: 3,
-              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
-            ),
-            child: Slider(
-              value: value.clamp(min, max).toDouble(),
-              min: min,
-              max: max,
-              onChanged: onChanged,
-              onChangeEnd: (_) => _layout.save(),
-            ),
-          ),
-        ),
-        SizedBox(
-          width: valueWidth,
-          child: Text(fmt != null ? fmt(value) : '${(value * 100).round()}%',
-              textAlign: TextAlign.end,
-              style: const TextStyle(color: Colors.white70, fontSize: 12)),
-        ),
-      ],
-    );
-  }
-
-  Future<void> _confirmResetAll() async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Reset this profile?'),
-        content: const Text('All controls and stick settings in this profile go back to the defaults.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Reset all')),
-        ],
-      ),
-    );
-    if (ok == true) {
-      _layout.resetAll();
-      _layout.save();
-    }
-  }
-
-  Widget _profileRow() {
-    return Row(
-      children: [
-        const Text('Profile', style: TextStyle(color: Colors.white70, fontSize: 12)),
-        const SizedBox(width: 8),
-        DropdownButtonHideUnderline(
-          child: DropdownButton<String>(
-            value: _layout.active,
-            isDense: true,
-            dropdownColor: const Color(0xFF1E1E2A),
-            style: const TextStyle(color: Colors.white, fontSize: 13),
-            items: [
-              for (final n in _layout.profileNames)
-                DropdownMenuItem(value: n, child: Text(n)),
-            ],
-            onChanged: (n) {
-              if (n == null) return;
-              _layout.switchTo(n);
-              _layout.save();
-            },
-          ),
-        ),
-        const Spacer(),
-        IconButton(
-          tooltip: 'New profile (copy of this one)',
-          visualDensity: VisualDensity.compact,
-          iconSize: 20,
-          color: Colors.white70,
-          icon: const Icon(Icons.add),
-          onPressed: () async {
-            final n = await _askName('New profile (copy of current)', '');
-            if (n == null) return;
-            _layout.createProfile(n);
-            _layout.save();
-          },
-        ),
-        IconButton(
-          tooltip: 'Rename',
-          visualDensity: VisualDensity.compact,
-          iconSize: 20,
-          color: Colors.white70,
-          icon: const Icon(Icons.drive_file_rename_outline),
-          onPressed: () async {
-            final n = await _askName('Rename profile', _layout.active);
-            if (n == null) return;
-            _layout.renameActive(n);
-            _layout.save();
-          },
-        ),
-        if (_layout.canDeleteActive)
-          IconButton(
-            tooltip: 'Delete profile',
-            visualDensity: VisualDensity.compact,
-            iconSize: 20,
-            color: Colors.white70,
-            icon: const Icon(Icons.delete_outline),
-            onPressed: _confirmDeleteProfile,
-          ),
-      ],
-    );
-  }
-
-  static const List<int> _palette = [
-    0xFF8A2BE2, 0xFF00BFFF, 0xFF00FF85, 0xFFFF1744, 0xFFFFD600,
-    0xFFFF9100, 0xFFFF00E5, 0xFF546E7A, 0xFF212121, 0xFFFFFFFF,
-  ];
-
-  Widget _swatch(String id, int? argb, ItemLayout it) {
-    final selected = it.color == argb;
-    return GestureDetector(
-      onTap: () {
-        _layout.setColor(id, argb);
-        _layout.save();
-      },
-      child: Container(
-        width: 26,
-        height: 26,
-        margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 5),
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: argb == null ? Colors.transparent : Color(argb),
-          border: Border.all(
-            color: selected ? Colors.white : Colors.white24,
-            width: selected ? 2.5 : 1,
-          ),
-        ),
-        child: argb == null
-            ? const Icon(Icons.block, size: 14, color: Colors.white54)
-            : null,
-      ),
-    );
-  }
-
-  Widget _colorRow(String id, ItemLayout it) {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        children: [
-          const Text('Color', style: TextStyle(color: Colors.white70, fontSize: 12)),
-          const SizedBox(width: 8),
-          _swatch(id, null, it), // default colour
-          for (final c in _palette) _swatch(id, c, it),
-        ],
-      ),
-    );
+  Future<void> _renamePlayer() async {
+    final current = await PlayerName.load();
+    final n = await _askName('Player name', current, hint: 'Your name');
+    if (n == null) return;
+    final name = PlayerName.clean(n);
+    await PlayerName.save(name);
+    widget.socket?.rename(name);
+    _toast('Player name: $name');
   }
 
   Future<void> _copyProfile() async {
@@ -671,382 +719,14 @@ class _GamepadScreenState extends State<GamepadScreen> {
     _toast('Imported "$name"');
   }
 
-  Widget _globalRow() {
-    const small = TextStyle(color: Colors.white70, fontSize: 12);
-    return Wrap(
-      spacing: 4,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        const Text('Grid', style: small),
-        Switch(value: _snap, onChanged: (v) => setState(() => _snap = v)),
-        const SizedBox(width: 4),
-        const Text('Vibration', style: small),
-        for (final e in const [(0, 'Off'), (1, 'Light'), (2, 'Strong')])
-          Padding(
-            padding: const EdgeInsets.only(left: 4),
-            child: ChoiceChip(
-              label: Text(e.$2, style: const TextStyle(fontSize: 11)),
-              visualDensity: VisualDensity.compact,
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              selected: _layout.settings.haptics == e.$1,
-              onSelected: (_) {
-                _layout.setHaptics(e.$1);
-                _layout.save();
-                _buzz(); // feel the new strength right away
-              },
-            ),
-          ),
-        TextButton.icon(
-          onPressed: _copyProfile,
-          icon: const Icon(Icons.copy, size: 16),
-          label: const Text('Copy'),
-        ),
-        TextButton.icon(
-          onPressed: _pasteProfile,
-          icon: const Icon(Icons.paste, size: 16),
-          label: const Text('Paste'),
-        ),
-      ],
-    );
-  }
-
-  /// Live indicator of the steering value coming from the tilt sensor.
-  Widget _tiltMeter() {
-    return ValueListenableBuilder<double>(
-      valueListenable: _tiltPreview,
-      builder: (context, v, _) => SizedBox(
-        height: 14,
-        child: LayoutBuilder(
-          builder: (context, bc) {
-            final w = bc.maxWidth;
-            return Stack(
-              children: [
-                Positioned.fill(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: Colors.white12,
-                      borderRadius: BorderRadius.circular(7),
-                    ),
-                  ),
-                ),
-                Positioned(
-                  left: w / 2 - 1,
-                  top: 0,
-                  bottom: 0,
-                  width: 2,
-                  child: const ColoredBox(color: Colors.white38),
-                ),
-                Positioned(
-                  left: (w - 14) * ((v.clamp(-1.0, 1.0) + 1) / 2),
-                  top: 0,
-                  width: 14,
-                  height: 14,
-                  child: const DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: AppColors.activeAccent,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                ),
-              ],
-            );
-          },
-        ),
-      ),
-    );
-  }
-
-  Widget _tiltRow() {
-    final st = _layout.settings;
-    const small = TextStyle(color: Colors.white70, fontSize: 12);
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Wrap(
-          spacing: 4,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            const Text('Tilt steering', style: small),
-            Switch(
-              value: st.tilt,
-              onChanged: (v) {
-                _layout.tweak((s) => s.tilt = v);
-                _layout.save();
-              },
-            ),
-            const Text('Controls', style: small),
-            for (final e in const [(false, 'Left stick X'), (true, 'Right stick X')])
-              Padding(
-                padding: const EdgeInsets.only(left: 4),
-                child: ChoiceChip(
-                  label: Text(e.$2, style: const TextStyle(fontSize: 11)),
-                  visualDensity: VisualDensity.compact,
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  selected: st.tiltRightStick == e.$1,
-                  onSelected: (_) {
-                    _layout.tweak((s) => s.tiltRightStick = e.$1);
-                    _layout.save();
-                  },
-                ),
-              ),
-            const SizedBox(width: 4),
-            const Text('Invert', style: small),
-            Switch(
-              value: st.tiltInvert,
-              onChanged: (v) {
-                _layout.tweak((s) => s.tiltInvert = v);
-                _layout.save();
-              },
-            ),
-            TextButton.icon(
-              onPressed: st.tilt ? _calibrateTilt : null,
-              icon: const Icon(Icons.my_location, size: 16),
-              label: const Text('Set center'),
-            ),
-          ],
-        ),
-        Row(
-          children: [
-            Expanded(
-              child: _sliderRow(
-                'Sensitivity',
-                st.tiltSens,
-                LayoutStore.minTiltSens,
-                LayoutStore.maxTiltSens,
-                (v) => _layout.tweak((s) => s.tiltSens = v),
-                fmt: (v) => '${(45 / v).round()}°',
-                labelWidth: 74,
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: _sliderRow(
-                'Deadzone',
-                st.tiltDeadzone,
-                0,
-                LayoutStore.maxTiltDeadzone,
-                (v) => _layout.tweak((s) => s.tiltDeadzone = v),
-                fmt: (v) => '${v.round()}°',
-                labelWidth: 74,
-              ),
-            ),
-          ],
-        ),
-        Row(
-          children: [
-            Expanded(
-              child: _sliderRow(
-                'Smoothing',
-                st.tiltSmooth,
-                0,
-                0.9,
-                (v) => _layout.tweak((s) => s.tiltSmooth = v),
-                labelWidth: 74,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(child: st.tilt ? _tiltMeter() : const SizedBox.shrink()),
-          ],
-        ),
-        const Align(
-          alignment: Alignment.centerLeft,
-          child: Text(
-            'Hold the phone like a steering wheel. The degrees next to '
-            'Sensitivity = how far you turn for full steering lock.',
-            style: TextStyle(color: Colors.white38, fontSize: 10),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _editPanel() {
+  /// Moves the selected control by a few pixels (editor arrow buttons).
+  void _nudge(double dx, double dy, BoxConstraints c) {
     final id = _selected;
-    final spec = id == null ? null : _layout.spec(id);
-    final it = id == null ? null : _layout.of(id);
-    final isStick = id == 'lstick' || id == 'rstick';
-    final isTrigger = id == 'lt' || id == 'rt';
-    final st = _layout.settings;
-    // Keep the panel away from the control being edited.
-    final atTop = it != null && it.y > 0.5;
-    const small = TextStyle(color: Colors.white70, fontSize: 12);
-
-    final panel = Material(
-      color: Colors.black.withOpacity(0.85),
-      borderRadius: BorderRadius.circular(14),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 4, 8, 4),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    spec?.title ?? 'Edit layout — drag a control, tap to adjust',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13),
-                  ),
-                ),
-                if (id != null)
-                  TextButton(
-                    onPressed: () {
-                      _layout.resetItem(id);
-                      _layout.save();
-                    },
-                    child: const Text('Reset'),
-                  ),
-                TextButton(onPressed: _confirmResetAll, child: const Text('Reset all')),
-                FilledButton(onPressed: _exitEdit, child: const Text('Done')),
-              ],
-            ),
-            _profileRow(),
-            if (id != null && it != null && spec != null) ...[
-              Row(
-                children: [
-                  Expanded(
-                    child: _sliderRow('Size', it.scale, LayoutStore.minScale,
-                        LayoutStore.maxScale, (v) => _layout.setScale(id, v)),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _sliderRow('Opacity', it.opacity, LayoutStore.minOpacity, 1.0,
-                        (v) => _layout.setOpacity(id, v)),
-                  ),
-                  if (isStick) ...[
-                    const SizedBox(width: 4),
-                    const Text('Float', style: small),
-                    Switch(
-                      value: _layout.isFloating(id),
-                      onChanged: (v) {
-                        _layout.setFloating(id, v);
-                        _layout.save();
-                      },
-                    ),
-                  ],
-                  if (spec.canHide) ...[
-                    const SizedBox(width: 4),
-                    const Text('Show', style: small),
-                    Switch(
-                      value: it.visible,
-                      onChanged: (v) {
-                        _layout.setVisible(id, v);
-                        _layout.save();
-                      },
-                    ),
-                  ],
-                ],
-              ),
-              if (isStick)
-                Row(
-                  children: [
-                    Expanded(
-                      child: _sliderRow(
-                        'Sensitivity',
-                        id == 'lstick' ? st.sensL : st.sensR,
-                        LayoutStore.minSensitivity,
-                        LayoutStore.maxSensitivity,
-                        (v) => _layout.setSensitivity(id == 'lstick', v),
-                        labelWidth: 74,
-                        valueWidth: 44,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: _sliderRow(
-                        'Deadzone',
-                        id == 'lstick' ? st.deadzoneL : st.deadzoneR,
-                        0,
-                        LayoutStore.maxDeadzone,
-                        (v) => _layout.setDeadzone(id == 'lstick', v),
-                        labelWidth: 74,
-                      ),
-                    ),
-                  ],
-                ),
-              if (isTrigger)
-                Row(
-                  children: [
-                    const Text('Double-tap to lock fully pressed', style: small),
-                    const SizedBox(width: 6),
-                    Switch(
-                      value: id == 'lt' ? st.latchLt : st.latchRt,
-                      onChanged: (v) {
-                        _layout.setLatch(id == 'lt', v);
-                        _layout.save();
-                      },
-                    ),
-                    const Expanded(
-                      child: Text('tap again to release',
-                          style: TextStyle(color: Colors.white38, fontSize: 10)),
-                    ),
-                  ],
-                ),
-              if (isTrigger)
-                Row(
-                  children: [
-                    const Text('Slide to steer (moves right stick)', style: small),
-                    const SizedBox(width: 6),
-                    Switch(
-                      value: id == 'lt' ? st.steerLt : st.steerRt,
-                      onChanged: (v) {
-                        _layout.setSteer(id == 'lt', v);
-                        _layout.save();
-                      },
-                    ),
-                    const Expanded(
-                      child: Text('press = full, slide finger = stick',
-                          style: TextStyle(color: Colors.white38, fontSize: 10)),
-                    ),
-                  ],
-                ),
-            ] else ...[
-              Row(
-                children: [
-                  for (final e in const [(0, 'General'), (1, 'Tilt steering')])
-                    Padding(
-                      padding: const EdgeInsets.only(right: 6),
-                      child: ChoiceChip(
-                        label: Text(e.$2, style: const TextStyle(fontSize: 11)),
-                        visualDensity: VisualDensity.compact,
-                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        selected: _panelTab == e.$1,
-                        onSelected: (_) => setState(() => _panelTab = e.$1),
-                      ),
-                    ),
-                ],
-              ),
-              if (_panelTab == 0) _globalRow() else _tiltRow(),
-            ],
-            if (id != null && it != null && spec != null && spec.canColor)
-              _colorRow(id, it),
-          ],
-        ),
-      ),
-    );
-
-    return Positioned(
-      top: atTop ? 6 : null,
-      bottom: atTop ? null : 6,
-      left: 0,
-      right: 0,
-      child: Center(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: 680,
-            maxHeight: MediaQuery.of(context).size.height - 12,
-          ),
-          // Absorb touches so they don't fall through to controls underneath.
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () {},
-            child: SingleChildScrollView(child: panel),
-          ),
-        ),
-      ),
-    );
+    if (id == null) return;
+    final ctr = _center(id, c);
+    final t = _clampCenter(id, c, ctr.dx + dx, ctr.dy + dy);
+    _layout.setPosition(id, t.dx / c.maxWidth, t.dy / c.maxHeight);
+    _layout.save();
   }
 
   Offset _editButtonTopLeft(BoxConstraints c) {
@@ -1072,10 +752,11 @@ class _GamepadScreenState extends State<GamepadScreen> {
         onTap: _enterEdit,
         child: Container(
           decoration: BoxDecoration(
-            color: Colors.black.withOpacity(0.35),
+            color: Colors.black.withOpacity(0.4),
             shape: BoxShape.circle,
+            border: Border.all(color: AppColors.activeAccent.withOpacity(0.5)),
           ),
-          child: const Icon(Icons.edit, color: Colors.white70, size: 18),
+          child: const Icon(Icons.edit, color: AppColors.activeAccent, size: 18),
         ),
       ),
     );
@@ -1170,11 +851,25 @@ class _GamepadScreenState extends State<GamepadScreen> {
                   listenable: _layout,
                   builder: (context, _) {
                     return Stack(
+                      fit: StackFit.expand,
                       children: [
+                        const Positioned.fill(
+                          child: IgnorePointer(
+                            child: CustomPaint(painter: HudGridPainter(step: 40, opacity: 0.03)),
+                          ),
+                        ),
                         if (_editing && _snap)
                           Positioned.fill(
                             child: IgnorePointer(
                               child: CustomPaint(painter: _GridPainter(_grid)),
+                            ),
+                          ),
+                        // Tap on empty space = deselect.
+                        if (_editing)
+                          Positioned.fill(
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () => setState(() => _selected = null),
                             ),
                           ),
                         // LT - Left Trigger
@@ -1187,9 +882,12 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               color: _colorOf('lt'),
                               latchEnabled: _layout.settings.latchLt,
                               steerEnabled: _layout.settings.steerLt,
+                              aimEnabled: _layout.settings.aimLt,
+                              aimFireK: _layout.settings.aimFire,
+                              latchLevel: _layout.settings.latchLevelLt,
                               onSteer: _handleTriggerSteer,
                               onLatchChanged: (_) => HapticFeedback.mediumImpact(),
-                              size: 112,
+                              size: 100,
                               onChanged: (v) {
                                 _handleTriggerHaptic(v, true);
                                 _state.setLeftTrigger(v);
@@ -1202,9 +900,13 @@ class _GamepadScreenState extends State<GamepadScreen> {
                             c,
                             GamepadButtonWidget(
                               label: 'LB',
-                              size: 70,
+                              pill: true,
+                              size: 42,
                               color: _colorOr('lb', AppColors.stickFill),
+                              toggle: _tg('lb'),
+                              turbo: _tb('lb'),
                               onChanged: (p) => _handleButtonPress(Protocol.bitLb, p),
+                              onPulse: (p) => _state.setButton(Protocol.bitLb, p),
                             )),
 
                         // D-pad
@@ -1236,13 +938,20 @@ class _GamepadScreenState extends State<GamepadScreen> {
                             GestureDetector(
                               onTap: _disconnect,
                               child: Container(
-                                width: 50,
-                                height: 50,
+                                width: 44,
+                                height: 44,
                                 alignment: Alignment.center,
                                 decoration: BoxDecoration(
                                     color: _colorOr('disconnect', AppColors.stickFill),
-                                    shape: BoxShape.circle),
-                                child: const Icon(Icons.close, color: Colors.white, size: 22),
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                        color: Colors.white.withOpacity(0.35), width: 2),
+                                    boxShadow: [
+                                      BoxShadow(
+                                          color: AppColors.danger.withOpacity(0.35),
+                                          blurRadius: 10),
+                                    ]),
+                                child: const Icon(Icons.close, color: Colors.white, size: 20),
                               ),
                             )),
 
@@ -1253,9 +962,12 @@ class _GamepadScreenState extends State<GamepadScreen> {
                             GamepadButtonWidget(
                               label: '',
                               icon: Icons.menu,
-                              size: 60,
+                              size: 56,
                               color: _colorOr('back', AppColors.stickFill),
+                              toggle: _tg('back'),
+                              turbo: _tb('back'),
                               onChanged: (p) => _handleButtonPress(Protocol.bitBack, p),
+                              onPulse: (p) => _state.setButton(Protocol.bitBack, p),
                             )),
                         _item(
                             'guide',
@@ -1263,9 +975,12 @@ class _GamepadScreenState extends State<GamepadScreen> {
                             GamepadButtonWidget(
                               label: '',
                               icon: Icons.sports_esports,
-                              size: 68,
+                              size: 64,
                               color: _colorOr('guide', AppColors.stickFill),
+                              toggle: _tg('guide'),
+                              turbo: _tb('guide'),
                               onChanged: (p) => _handleButtonPress(Protocol.bitGuide, p),
+                              onPulse: (p) => _state.setButton(Protocol.bitGuide, p),
                             )),
                         _item(
                             'start',
@@ -1273,9 +988,12 @@ class _GamepadScreenState extends State<GamepadScreen> {
                             GamepadButtonWidget(
                               label: '',
                               icon: Icons.tune,
-                              size: 60,
+                              size: 56,
                               color: _colorOr('start', AppColors.stickFill),
+                              toggle: _tg('start'),
+                              turbo: _tb('start'),
                               onChanged: (p) => _handleButtonPress(Protocol.bitStart, p),
+                              onPulse: (p) => _state.setButton(Protocol.bitStart, p),
                             )),
 
                         // L3 / R3 stick clicks
@@ -1287,7 +1005,10 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               pill: true,
                               size: 40,
                               color: _colorOr('l3', AppColors.stickFill),
+                              toggle: _tg('l3'),
+                              turbo: _tb('l3'),
                               onChanged: (p) => _handleButtonPress(Protocol.bitLsClick, p),
+                              onPulse: (p) => _state.setButton(Protocol.bitLsClick, p),
                             )),
                         _item(
                             'r3',
@@ -1297,7 +1018,10 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               pill: true,
                               size: 40,
                               color: _colorOr('r3', AppColors.stickFill),
+                              toggle: _tg('r3'),
+                              turbo: _tb('r3'),
                               onChanged: (p) => _handleButtonPress(Protocol.bitRsClick, p),
+                              onPulse: (p) => _state.setButton(Protocol.bitRsClick, p),
                             )),
 
                         // Sticks
@@ -1314,6 +1038,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                                       _handleJoystickHaptic(x, y, true);
                                       final v = _shape(x, y, left: true);
                                       _state.setLeftStick(v[0], v[1]);
+                                      _updateAutoSprint(v[0], v[1]);
                                     },
                                   )
                                 : JoystickWidget(
@@ -1323,6 +1048,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                                       _handleJoystickHaptic(x, y, true);
                                       final v = _shape(x, y, left: true);
                                       _state.setLeftStick(v[0], v[1]);
+                                      _updateAutoSprint(v[0], v[1]);
                                     },
                                   )),
                         _item(
@@ -1356,9 +1082,13 @@ class _GamepadScreenState extends State<GamepadScreen> {
                             c,
                             GamepadButtonWidget(
                               label: 'RB',
-                              size: 70,
+                              pill: true,
+                              size: 42,
                               color: _colorOr('rb', AppColors.stickFill),
+                              toggle: _tg('rb'),
+                              turbo: _tb('rb'),
                               onChanged: (p) => _handleButtonPress(Protocol.bitRb, p),
+                              onPulse: (p) => _state.setButton(Protocol.bitRb, p),
                             )),
                         _item(
                             'rt',
@@ -1369,9 +1099,12 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               color: _colorOf('rt'),
                               latchEnabled: _layout.settings.latchRt,
                               steerEnabled: _layout.settings.steerRt,
+                              aimEnabled: _layout.settings.aimRt,
+                              aimFireK: _layout.settings.aimFire,
+                              latchLevel: _layout.settings.latchLevelRt,
                               onSteer: _handleTriggerSteer,
                               onLatchChanged: (_) => HapticFeedback.mediumImpact(),
-                              size: 112,
+                              size: 100,
                               onChanged: (v) {
                                 _handleTriggerHaptic(v, false);
                                 _state.setRightTrigger(v);
@@ -1384,40 +1117,80 @@ class _GamepadScreenState extends State<GamepadScreen> {
                             c,
                             GamepadButtonWidget(
                               label: 'Y',
+                              size: 62,
                               color: _colorOr('btn_y', AppColors.buttonY),
+                              toggle: _tg('btn_y'),
+                              turbo: _tb('btn_y'),
                               onChanged: (p) => _handleButtonPress(Protocol.bitY, p),
+                              onPulse: (p) => _state.setButton(Protocol.bitY, p),
                             )),
                         _item(
                             'btn_a',
                             c,
                             GamepadButtonWidget(
                               label: 'A',
+                              size: 62,
                               color: _colorOr('btn_a', AppColors.buttonA),
+                              toggle: _tg('btn_a'),
+                              turbo: _tb('btn_a'),
                               onChanged: (p) => _handleButtonPress(Protocol.bitA, p),
+                              onPulse: (p) => _state.setButton(Protocol.bitA, p),
                             )),
                         _item(
                             'btn_x',
                             c,
                             GamepadButtonWidget(
                               label: 'X',
+                              size: 62,
                               color: _colorOr('btn_x', AppColors.buttonX),
+                              toggle: _tg('btn_x'),
+                              turbo: _tb('btn_x'),
                               onChanged: (p) => _handleButtonPress(Protocol.bitX, p),
+                              onPulse: (p) => _state.setButton(Protocol.bitX, p),
                             )),
                         _item(
                             'btn_b',
                             c,
                             GamepadButtonWidget(
                               label: 'B',
+                              size: 62,
                               color: _colorOr('btn_b', AppColors.buttonB),
+                              toggle: _tg('btn_b'),
+                              turbo: _tb('btn_b'),
                               onChanged: (p) => _handleButtonPress(Protocol.bitB, p),
+                              onPulse: (p) => _state.setButton(Protocol.bitB, p),
                             )),
 
+                        if (_editing && (_guideX != null || _guideY != null))
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: CustomPaint(painter: _GuidePainter(_guideX, _guideY)),
+                            ),
+                          ),
                         if (_editing)
-                          _editPanel()
+                          LayoutEditor(
+                            layout: _layout,
+                            selected: _selected,
+                            onSelect: (id) => setState(() => _selected = id),
+                            snap: _snap,
+                            onSnap: (v) => setState(() => _snap = v),
+                            onDone: _exitEdit,
+                            onNudge: (dx, dy) => _nudge(dx, dy, c),
+                            lastApp: _lastApp,
+                            tiltPreview: _tiltPreview,
+                            onCalibrate: _calibrateTilt,
+                            onBeginAutoCal: _beginAutoCal,
+                            onApplyAutoProfile: _applyAutoProfile,
+                            onRenamePlayer: _renamePlayer,
+                            onCopy: _copyProfile,
+                            onPaste: _pasteProfile,
+                            onAddGame: _addGame,
+                            onBuzz: _buzz,
+                          )
                         else ...[
                           _editButton(c),
                           if (_layout.profileNames.length > 1) _profileChip(c),
-          if (_layout.settings.tilt) _calibChip(c),
+                          if (_layout.settings.tilt) _calibChip(c),
                         ],
                       ],
                     );
@@ -1430,6 +1203,23 @@ class _GamepadScreenState extends State<GamepadScreen> {
       ),
     );
   }
+}
+
+class _GuidePainter extends CustomPainter {
+  final double? x, y;
+  const _GuidePainter(this.x, this.y);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = AppColors.accent.withOpacity(0.8)
+      ..strokeWidth = 1.2;
+    if (x != null) canvas.drawLine(Offset(x!, 0), Offset(x!, size.height), paint);
+    if (y != null) canvas.drawLine(Offset(0, y!), Offset(size.width, y!), paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _GuidePainter old) => old.x != x || old.y != y;
 }
 
 class _GridPainter extends CustomPainter {

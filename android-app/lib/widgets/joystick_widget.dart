@@ -47,6 +47,8 @@ class _JoystickWidgetState extends State<JoystickWidget> {
   @override
   Widget build(BuildContext context) {
     final radius = widget.size / 2;
+    final base = widget.color ?? AppColors.stickFill;
+    final active = _knob != Offset.zero;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -60,20 +62,66 @@ class _JoystickWidgetState extends State<JoystickWidget> {
             height: widget.size,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: widget.color ?? AppColors.stickFill,
+              gradient: RadialGradient(
+                colors: [
+                  Color.lerp(base, Colors.black, 0.45)!,
+                  base,
+                  Color.lerp(base, Colors.white, 0.12)!,
+                ],
+                stops: const [0.0, 0.7, 1.0],
+              ),
+              border: Border.all(
+                  color: Colors.white.withOpacity(active ? 0.55 : 0.25), width: 2),
+              boxShadow: [
+                BoxShadow(
+                    color: AppColors.activeAccent.withOpacity(active ? 0.28 : 0.08),
+                    blurRadius: 18),
+                BoxShadow(
+                    color: Colors.black.withOpacity(0.35),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4)),
+              ],
             ),
-            child: Center(
-              child: Transform.translate(
-                offset: _knob,
-                child: Container(
-                  width: widget.size * 0.5,
-                  height: widget.size * 0.5,
-                  decoration: const BoxDecoration(
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                // Inner guide ring.
+                Container(
+                  width: widget.size * 0.78,
+                  height: widget.size * 0.78,
+                  decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: Colors.white,
+                    border: Border.all(color: Colors.white.withOpacity(0.10), width: 1.5),
                   ),
                 ),
-              ),
+                // Knob: glossy sphere that lights up while held.
+                Transform.translate(
+                  offset: _knob,
+                  child: Container(
+                    width: widget.size * 0.5,
+                    height: widget.size * 0.5,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: const RadialGradient(
+                        center: Alignment(-0.3, -0.4),
+                        radius: 1.0,
+                        colors: [Colors.white, Color(0xFFD9D2FF), Color(0xFF8E7CFF)],
+                        stops: [0.0, 0.5, 1.0],
+                      ),
+                      border: Border.all(color: Colors.white.withOpacity(0.7), width: 1.5),
+                      boxShadow: [
+                        BoxShadow(
+                            color: AppColors.activeAccent.withOpacity(active ? 0.6 : 0.0),
+                            blurRadius: 16),
+                        BoxShadow(
+                            color: Colors.black.withOpacity(0.3),
+                            blurRadius: 6,
+                            offset: const Offset(0, 3)),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ),

@@ -18,6 +18,9 @@ class GamepadState {
   /// Right-stick override while a trigger is being slid (steer-with-trigger).
   double? trigRx, trigRy;
 
+  /// Gyro-aim contribution added on top of the right stick (null = none).
+  double? gyroRx, gyroRy;
+
   GamepadState(this.socket);
 
   void start() {
@@ -27,8 +30,8 @@ class GamepadState {
         buttons: _buttons,
         lx: tiltLx ?? lx,
         ly: ly,
-        rx: trigRx ?? tiltRx ?? rx,
-        ry: trigRy ?? ry,
+        rx: ((trigRx ?? tiltRx ?? rx) + (gyroRx ?? 0)).clamp(-1.0, 1.0).toDouble(),
+        ry: ((trigRy ?? ry) + (gyroRy ?? 0)).clamp(-1.0, 1.0).toDouble(),
         lt: lt,
         rt: rt,
       );
@@ -48,6 +51,7 @@ class GamepadState {
     lt = rt = 0;
     tiltLx = tiltRx = null;
     trigRx = trigRy = null;
+    gyroRx = gyroRy = null;
   }
 
   void setButton(int bit, bool pressed) {

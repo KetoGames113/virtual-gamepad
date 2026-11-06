@@ -17,6 +17,8 @@ public static class Protocol
     public const byte TypeDiscoverResponse = 5;
     public const byte TypeHelloAck = 6;
     public const byte TypeGoodbye = 7;
+    public const byte TypeActiveApp = 8;
+    public const byte TypeRumble = 9;
 
     public const int ClientTimeoutMs = 3000;
 

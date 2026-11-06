@@ -18,6 +18,7 @@ class GamepadSocket {
   String? _boundAddress;
   InternetAddress? _pcAddress;
   int _sequence = 0;
+  String _deviceName = 'Phone';
   Timer? _heartbeatTimer;
   Timer? _helloTimer;
   bool _sweeping = false;
@@ -26,9 +27,17 @@ class GamepadSocket {
   final _statusController = StreamController<ConnectionStatus>.broadcast();
   final _discoveredController = StreamController<DiscoveredHost>.broadcast();
   final _connectionController = StreamController<bool>.broadcast();
+  final _activeAppController = StreamController<String>.broadcast();
+  final _rumbleController = StreamController<List<int>>.broadcast();
 
   Stream<ConnectionStatus> get statusStream => _statusController.stream;
   Stream<DiscoveredHost> get discoveredStream => _discoveredController.stream;
+
+  /// Name of the PC's foreground app (process name), as reported by the host.
+  Stream<String> get activeAppStream => _activeAppController.stream;
+
+  /// Game rumble from the PC: [largeMotor, smallMotor], each 0-255.
+  Stream<List<int>> get rumbleStream => _rumbleController.stream;
 
   /// Exposes a clean boolean stream mapped directly from the state engine
   Stream<bool> get connectionStream => _connectionController.stream;
@@ -125,6 +134,14 @@ class GamepadSocket {
         name: reply.hostName!,
         address: datagram.address.address,
       ));
+    } else if (reply.type == Protocol.typeActiveApp && reply.hostName != null) {
+      _activeAppController.add(reply.hostName!);
+    } else if (reply.type == Protocol.typeRumble) {
+      // Only trust rumble from the PC we're actually connected to.
+      if (status == ConnectionStatus.connected &&
+          datagram.address.address == _pcAddress?.address) {
+        _rumbleController.add([reply.rumbleLarge ?? 0, reply.rumbleSmall ?? 0]);
+      }
     } else if (reply.type == Protocol.typeHelloAck) {
       // HELLO is retried, so duplicate ACKs are normal: only the first counts.
       if (status != ConnectionStatus.connecting) return;
@@ -232,6 +249,7 @@ class GamepadSocket {
   /// because a single UDP packet can easily get lost on Wi-Fi.
   Future<void> connect(String ipAddress, {String deviceName = 'Phone'}) async {
     await _ensureSocket();
+    _deviceName = deviceName;
     _pcAddress = InternetAddress(ipAddress);
     _setStatus(ConnectionStatus.connecting);
 
@@ -262,6 +280,17 @@ class GamepadSocket {
         _lastSent = DateTime.now();
       }
     });
+  }
+
+  /// Changes the name shown on the PC without reconnecting (re-sends HELLO;
+  /// the host just updates the name of the existing player).
+  void rename(String name) {
+    _deviceName = name;
+    final addr = _pcAddress;
+    if (_socket == null || addr == null) return;
+    try {
+      _socket!.send(PacketBuilder.hello(name), addr, Protocol.port);
+    } catch (_) {}
   }
 
   /// Gives up on a connection attempt that got no answer.
@@ -318,5 +347,7 @@ class GamepadSocket {
     _statusController.close();
     _discoveredController.close();
     _connectionController.close();
+    _activeAppController.close();
+    _rumbleController.close();
   }
 }

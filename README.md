@@ -109,9 +109,9 @@ This runs over UDP on WiFi, so it depends on your router and network congestion.
 - [x] Portrait-locked menus, landscape-locked gamepad screen
 - [x] One-click downloads via GitHub Releases
 - [ ] Bluetooth transport (fallback when there's no shared WiFi network)
-- [ ] Customizable button layout / remapping in-app
-- [ ] Rumble/vibration feedback from PC back to phone
-- [ ] Windows tray icon (minimize-to-tray)
+- [x] Customizable button layout / remapping in-app
+- [x] Rumble/vibration feedback from PC back to phone
+- [x] Windows tray icon (minimize-to-tray)
 - [ ] iOS build (Flutter already supports it; needs a paid Apple developer account for signing)
 
 ## 🧑‍💻 Building from source (optional, for contributors)
@@ -165,3 +165,30 @@ Created with ❤️ by [kaifcoding](https://github.com/kaifcoding) · © 2026 At
 - **Tilt steering** — edit layout → (tap empty space) → *Tilt steering* tab. Phone held like a wheel in landscape; drives left/right stick X. Sensitivity, deadzone, smoothing, invert, *Set center*; a small calibrate button appears next to the edit button during play.
 - **A / B / X / Y are separate controls** — move, resize, recolour or hide each one independently. Old layouts are migrated automatically.
 - **Trigger lock** — tap LT/RT in the editor → *Double-tap to lock*. Double-tap = held fully pressed; touch again to release.
+- **Aim & fire (LT/RT)** — touch = aim with the right stick, pull further = full press (fire). Adjustable *Fire pull*.
+- **Per-stick response curve and Y gain**, **tilt curve**, **auto-center for tilt**, **trigger lock level**, and **toggle mode** for buttons (tap on / tap off).
+- **Auto-switch profile by game (optional)** — the PC app reports the foreground game (new packet type 8); in the editor's General tab turn on *Auto-switch*, then tap *Use for "<game>"* while the game is in front. Requires the updated PC app.
+- **Player name** — set it on the connect screen (or *Player name* in the editor's General tab, changeable while playing). The PC app lists every connected player by name; duplicate names get " (2)", " (3)"… Requires the updated PC app only for the unique-name/list display.
+- **Turbo (rapid fire)** for any button (~12 presses/s while held) — editor → tap the button → *Turbo*.
+- **Auto-sprint** — left stick pushed fully forward clicks L3 automatically (editor → tap the left stick).
+- **Gyro aim** — editor → tap empty space → *Gyro aim* tab: rotate the phone to move the right stick (sensitivity, invert Y).
+
+## UI overhaul
+
+- **Gaming theme** — neon cyan/magenta on dark, chamfered HUD cards, Orbitron + Rajdhani fonts (Google Fonts; swap in your own via `assets/fonts/README.md`). Simplified connect screen (name + layout button on one row).
+- **Fixed: hiding one control made all of them disappear.** The hidden control left a non-positioned child in the Stack, which collapsed it to 0×0. Hidden controls are now a zero-size `Positioned` and the Stack uses `StackFit.expand`.
+- **New editor** (`lib/screens/layout_editor.dart`): slim dock (Done · profiles · undo · grid · hidden-controls tray · settings), an inspector for the selected control (size, opacity, colour, nudge arrows, hide/show, "More settings"), and a settings dialog (General / Tilt / Gyro / Games). Tap empty space to deselect.
+- **Better moving**: magnet guides (centre of screen / other controls), grid snap, nudge arrows, undo (up to 40 steps), "Hidden controls" tray to bring hidden buttons back.
+
+## Game rumble, tray icon and font
+
+- **Game rumble (PC -> phone)** — when a game rumbles the virtual controller, your phone vibrates. Editor -> tap empty space -> *General* -> *Game rumble* (0 = off, up to 100%). Uses the phone's real vibration motor (with intensity on phones that support it). Needs the updated PC app.
+- **Windows tray icon** — minimizing the PC app hides it to the system tray and the server keeps running; click the tray icon to reopen, right-click for *Exit*. The close button (X) still quits.
+- **Bundled font** — *18 Khebrat Musamim Bold* is bundled in `android-app/assets/fonts/` and used for the whole app (works offline, supports Arabic and Latin). Make sure you have the right to redistribute the font.
+
+## New look
+
+- **Animated main screen** — drifting neon orbs, a gliding synthwave floor and floating particles behind neon-framed panels, a pulsing logo and a glowing CONNECT button.
+- **New controls** — glossy A/B/X/Y spheres, capsule bumpers (LB/RB), a cross-shaped D-pad whose arms light up, sticks with a guide ring and a glowing knob, and triggers with a pressure gauge.
+- **Re-tuned default layout** — triggers + bumpers in a top row, D-pad and left stick under the left thumb, right stick and A/B/X/Y under the right thumb, and the system buttons grouped in the middle. Existing saved layouts are kept; *Reset* in the editor applies the new defaults.
+

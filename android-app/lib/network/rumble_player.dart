@@ -41,7 +41,7 @@ class RumblePlayer {
       stop();
       return;
     }
-    final amp = (level * 255).round().clamp(1, 255);
+    final int amp = (level * 255).round().clamp(1, 255).toInt();
 
     _watchdog?.cancel();
     _watchdog = Timer(const Duration(milliseconds: 450), stop);

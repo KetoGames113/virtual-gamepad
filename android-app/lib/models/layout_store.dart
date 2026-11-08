@@ -108,6 +108,12 @@ class ProfileSettings {
   /// Item ids whose button auto-repeats while held (rapid fire).
   Set<String> turbo;
 
+  /// Rapid-fire speed: presses per second (shared by buttons and triggers).
+  double turboRate;
+
+  /// Show the ping badge on the gamepad screen.
+  bool showPing;
+
   /// Click L3 automatically when the left stick is pushed fully forward.
   bool autoSprint;
 
@@ -149,6 +155,8 @@ class ProfileSettings {
     this.aimLt = false,
     this.aimRt = false,
     this.aimFire = 1.8,
+    this.turboRate = 12.0,
+    this.showPing = true,
     Set<String>? toggles,
     List<String>? games,
     Set<String>? turbo,
@@ -194,6 +202,8 @@ class ProfileSettings {
         'tg': toggles.toList(),
         'ga': games,
         'tb': turbo.toList(),
+        'tbr': turboRate,
+        'spg': showPing,
         'asp': autoSprint,
         'gy': gyro,
         'gs': gyroSens,
@@ -249,6 +259,8 @@ class ProfileSettings {
       turbo: j['tb'] is List
           ? {for (final e in j['tb'] as List) if (e is String) e}
           : <String>{},
+      turboRate: c(j['tbr'], 12, LayoutStore.minTurboRate, LayoutStore.maxTurboRate),
+      showPing: j['spg'] != false,
       autoSprint: j['asp'] == true,
       gyro: j['gy'] == true,
       gyroSens: c(j['gs'], 1, LayoutStore.minTiltSens, LayoutStore.maxTiltSens),
@@ -293,6 +305,8 @@ class ProfileSettings {
         toggles: {...toggles},
         games: [...games],
         turbo: {...turbo},
+        turboRate: turboRate,
+        showPing: showPing,
         autoSprint: autoSprint,
         gyro: gyro,
         gyroSens: gyroSens,
@@ -391,6 +405,11 @@ class LayoutStore extends ChangeNotifier {
   static const double minLatchLevel = 0.2;
   static const double minAimFire = 1.2;
   static const double maxAimFire = 3.0;
+
+  // Capped at 20/s: the app sends input 60 times a second, so faster pulses
+  // would be merged and some presses lost.
+  static const double minTurboRate = 4.0;
+  static const double maxTurboRate = 20.0;
 
   /// Only used to read the position of the old combined A/B/X/Y control.
   static const ItemSpec faceLegacySpec =

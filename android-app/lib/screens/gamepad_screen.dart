@@ -81,6 +81,16 @@ class _GamepadScreenState extends State<GamepadScreen> {
   bool _tg(String id) => _layout.settings.toggles.contains(id);
   bool _tb(String id) => _layout.settings.turbo.contains(id);
 
+  /// Half of one turbo press/release cycle, from the "Turbo speed" setting.
+  int get _turboHalfMs =>
+      (500 / _layout.settings.turboRate).round().clamp(15, 125).toInt();
+
+  // Connection quality shown on screen: round-trip time and reconnecting state.
+  final ValueNotifier<int?> _ping = ValueNotifier<int?>(null);
+  final ValueNotifier<bool> _reconnecting = ValueNotifier<bool>(false);
+  StreamSubscription<int>? _pingSub;
+  StreamSubscription<bool>? _reconnectSub;
+
   @override
   void initState() {
     super.initState();
@@ -95,6 +105,8 @@ class _GamepadScreenState extends State<GamepadScreen> {
     _rumble.init();
     _rumbleSub = widget.socket?.rumbleStream
         .listen((m) => _rumble.update(m[0], m[1], _layout.settings.rumble));
+    _pingSub = widget.socket?.pingStream.listen((ms) => _ping.value = ms);
+    _reconnectSub = widget.socket?.reconnectingStream.listen(_onReconnecting);
     _layout.addListener(_syncTilt);
     _layout.load();
     WakelockPlus.enable();
@@ -119,6 +131,10 @@ class _GamepadScreenState extends State<GamepadScreen> {
     _gyroSub?.cancel();
     _appSub?.cancel();
     _rumbleSub?.cancel();
+    _pingSub?.cancel();
+    _reconnectSub?.cancel();
+    _ping.dispose();
+    _reconnecting.dispose();
     _rumble.dispose();
     _tiltPreview.dispose();
     _state.stop();
@@ -132,6 +148,64 @@ class _GamepadScreenState extends State<GamepadScreen> {
       DeviceOrientation.portraitUp,
     ]);
     super.dispose();
+  }
+
+  /// The PC stopped answering (or answers again): the socket keeps trying by
+  /// itself, we only tell the player and make sure nothing stays held.
+  void _onReconnecting(bool v) {
+    _reconnecting.value = v;
+    if (v) {
+      HapticFeedback.heavyImpact();
+      _releaseAll();
+    }
+  }
+
+  /// Small badge at the top centre: ping in ms, or "Reconnecting…".
+  Widget _netBadge() {
+    return Positioned(
+      top: 6,
+      left: 0,
+      right: 0,
+      child: IgnorePointer(
+        child: Center(
+          child: ValueListenableBuilder<bool>(
+            valueListenable: _reconnecting,
+            builder: (context, reconnecting, _) {
+              return ValueListenableBuilder<int?>(
+                valueListenable: _ping,
+                builder: (context, ping, _) {
+                  if (!reconnecting && (ping == null || !_layout.settings.showPing)) {
+                    return const SizedBox.shrink();
+                  }
+                  final p = ping ?? 0;
+                  final Color color = reconnecting
+                      ? AppColors.warning
+                      : (p < 40
+                          ? AppColors.success
+                          : (p < 90 ? AppColors.warning : AppColors.danger));
+                  final String text = reconnecting ? 'Reconnecting…' : '$p ms';
+                  return Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(0.35),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      text,
+                      style: TextStyle(
+                        color: color,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+      ),
+    );
   }
 
   /// Automatically safely updates UI state and resets navigation back to the connection layout
@@ -884,6 +958,9 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               steerEnabled: _layout.settings.steerLt,
                               aimEnabled: _layout.settings.aimLt,
                               aimFireK: _layout.settings.aimFire,
+                              turbo: _tb('lt'),
+                              turboHalfMs: _turboHalfMs,
+                              onPulse: (v) => _state.setLeftTrigger(v),
                               latchLevel: _layout.settings.latchLevelLt,
                               onSteer: _handleTriggerSteer,
                               onLatchChanged: (_) => HapticFeedback.mediumImpact(),
@@ -905,6 +982,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               color: _colorOr('lb', AppColors.stickFill),
                               toggle: _tg('lb'),
                               turbo: _tb('lb'),
+                              turboHalfMs: _turboHalfMs,
                               onChanged: (p) => _handleButtonPress(Protocol.bitLb, p),
                               onPulse: (p) => _state.setButton(Protocol.bitLb, p),
                             )),
@@ -966,6 +1044,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               color: _colorOr('back', AppColors.stickFill),
                               toggle: _tg('back'),
                               turbo: _tb('back'),
+                              turboHalfMs: _turboHalfMs,
                               onChanged: (p) => _handleButtonPress(Protocol.bitBack, p),
                               onPulse: (p) => _state.setButton(Protocol.bitBack, p),
                             )),
@@ -979,6 +1058,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               color: _colorOr('guide', AppColors.stickFill),
                               toggle: _tg('guide'),
                               turbo: _tb('guide'),
+                              turboHalfMs: _turboHalfMs,
                               onChanged: (p) => _handleButtonPress(Protocol.bitGuide, p),
                               onPulse: (p) => _state.setButton(Protocol.bitGuide, p),
                             )),
@@ -992,6 +1072,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               color: _colorOr('start', AppColors.stickFill),
                               toggle: _tg('start'),
                               turbo: _tb('start'),
+                              turboHalfMs: _turboHalfMs,
                               onChanged: (p) => _handleButtonPress(Protocol.bitStart, p),
                               onPulse: (p) => _state.setButton(Protocol.bitStart, p),
                             )),
@@ -1007,6 +1088,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               color: _colorOr('l3', AppColors.stickFill),
                               toggle: _tg('l3'),
                               turbo: _tb('l3'),
+                              turboHalfMs: _turboHalfMs,
                               onChanged: (p) => _handleButtonPress(Protocol.bitLsClick, p),
                               onPulse: (p) => _state.setButton(Protocol.bitLsClick, p),
                             )),
@@ -1020,6 +1102,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               color: _colorOr('r3', AppColors.stickFill),
                               toggle: _tg('r3'),
                               turbo: _tb('r3'),
+                              turboHalfMs: _turboHalfMs,
                               onChanged: (p) => _handleButtonPress(Protocol.bitRsClick, p),
                               onPulse: (p) => _state.setButton(Protocol.bitRsClick, p),
                             )),
@@ -1087,6 +1170,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               color: _colorOr('rb', AppColors.stickFill),
                               toggle: _tg('rb'),
                               turbo: _tb('rb'),
+                              turboHalfMs: _turboHalfMs,
                               onChanged: (p) => _handleButtonPress(Protocol.bitRb, p),
                               onPulse: (p) => _state.setButton(Protocol.bitRb, p),
                             )),
@@ -1101,6 +1185,9 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               steerEnabled: _layout.settings.steerRt,
                               aimEnabled: _layout.settings.aimRt,
                               aimFireK: _layout.settings.aimFire,
+                              turbo: _tb('rt'),
+                              turboHalfMs: _turboHalfMs,
+                              onPulse: (v) => _state.setRightTrigger(v),
                               latchLevel: _layout.settings.latchLevelRt,
                               onSteer: _handleTriggerSteer,
                               onLatchChanged: (_) => HapticFeedback.mediumImpact(),
@@ -1121,6 +1208,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               color: _colorOr('btn_y', AppColors.buttonY),
                               toggle: _tg('btn_y'),
                               turbo: _tb('btn_y'),
+                              turboHalfMs: _turboHalfMs,
                               onChanged: (p) => _handleButtonPress(Protocol.bitY, p),
                               onPulse: (p) => _state.setButton(Protocol.bitY, p),
                             )),
@@ -1133,6 +1221,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               color: _colorOr('btn_a', AppColors.buttonA),
                               toggle: _tg('btn_a'),
                               turbo: _tb('btn_a'),
+                              turboHalfMs: _turboHalfMs,
                               onChanged: (p) => _handleButtonPress(Protocol.bitA, p),
                               onPulse: (p) => _state.setButton(Protocol.bitA, p),
                             )),
@@ -1145,6 +1234,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               color: _colorOr('btn_x', AppColors.buttonX),
                               toggle: _tg('btn_x'),
                               turbo: _tb('btn_x'),
+                              turboHalfMs: _turboHalfMs,
                               onChanged: (p) => _handleButtonPress(Protocol.bitX, p),
                               onPulse: (p) => _state.setButton(Protocol.bitX, p),
                             )),
@@ -1157,6 +1247,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                               color: _colorOr('btn_b', AppColors.buttonB),
                               toggle: _tg('btn_b'),
                               turbo: _tb('btn_b'),
+                              turboHalfMs: _turboHalfMs,
                               onChanged: (p) => _handleButtonPress(Protocol.bitB, p),
                               onPulse: (p) => _state.setButton(Protocol.bitB, p),
                             )),
@@ -1188,6 +1279,7 @@ class _GamepadScreenState extends State<GamepadScreen> {
                             onBuzz: _buzz,
                           )
                         else ...[
+                          if (widget.socket != null) _netBadge(),
                           _editButton(c),
                           if (_layout.profileNames.length > 1) _profileChip(c),
                           if (_layout.settings.tilt) _calibChip(c),

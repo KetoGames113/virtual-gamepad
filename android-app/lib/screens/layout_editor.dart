@@ -585,10 +585,14 @@ class _LayoutEditorState extends State<LayoutEditor> {
                 })),
           ],
         ),
-        if (aim)
+        if (aim) ...[
           _slider('Fire pull', st.aimFire, LayoutStore.minAimFire, LayoutStore.maxAimFire,
               (v) => _l.tweak((s) => s.aimFire = v),
               fmt: (v) => '${v.toStringAsFixed(1)}×', labelWidth: 74, valueWidth: 44),
+          _switchRow('Turbo (rapid fire)', st.turbo.contains(id), (v) {
+            _l.tweak((s) => v ? s.turbo.add(id) : s.turbo.remove(id));
+          }, hint: 'repeats the press while you hold the pull'),
+        ],
         const Text('Aim & fire: touch = aim with the right stick, pull further = full press.',
             style: _hint),
       ]);
@@ -718,6 +722,14 @@ class _LayoutEditorState extends State<LayoutEditor> {
             fmt: (v) => v <= 0 ? 'Off' : '${(v * 100).round()}%'),
         const Text('The phone vibrates when the game rumbles (needs the updated PC app).',
             style: _small),
+        const SizedBox(height: 6),
+        _slider('Turbo speed', st.turboRate, LayoutStore.minTurboRate,
+            LayoutStore.maxTurboRate, (v) => _l.tweak((s) => s.turboRate = v),
+            labelWidth: 92, valueWidth: 56, fmt: (v) => '${v.round()}/s'),
+        const Text('How fast rapid-fire buttons and triggers repeat the press.',
+            style: _small),
+        _switchRow('Show ping', st.showPing, (v) => _l.tweak((s) => s.showPing = v),
+            hint: 'small badge with the connection delay while playing'),
         const SizedBox(height: 10),
         Wrap(
           spacing: 8,

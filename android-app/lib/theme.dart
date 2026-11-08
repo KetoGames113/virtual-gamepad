@@ -58,7 +58,7 @@ class AppFonts {
 }
 
 /// The chamfered-corner shape used by cards and panels (gaming look).
-ShapeBorder hudShape({Color? border, double cut = 16, double width = 1}) {
+OutlinedBorder hudShape({Color? border, double cut = 16, double width = 1}) {
   return BeveledRectangleBorder(
     borderRadius: BorderRadius.only(
       topLeft: Radius.circular(cut),

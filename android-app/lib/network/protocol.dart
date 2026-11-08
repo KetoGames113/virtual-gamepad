@@ -16,6 +16,8 @@ class Protocol {
   static const int typeGoodbye = 7;
   static const int typeActiveApp = 8;
   static const int typeRumble = 9;
+  static const int typePing = 10;
+  static const int typePong = 11;
 
   static const int bitA = 0;
   static const int bitB = 1;
@@ -57,6 +59,15 @@ class PacketBuilder {
 
   static Uint8List goodbye() {
     return Uint8List.fromList([Protocol.magic, Protocol.typeGoodbye]);
+  }
+
+  /// 6-byte latency probe. The PC echoes the 4-byte [id] back in a PONG.
+  static Uint8List ping(int id) {
+    final data = ByteData(6);
+    data.setUint8(0, Protocol.magic);
+    data.setUint8(1, Protocol.typePing);
+    data.setUint32(2, id & 0xFFFFFFFF, Endian.little);
+    return data.buffer.asUint8List();
   }
 
   /// Builds an 18-byte INPUT packet. Stick axes must be in [-1.0, 1.0],
@@ -113,12 +124,16 @@ class ParsedReply {
   /// RUMBLE: motor speeds 0-255 (large = heavy/low-frequency, small = light).
   final int? rumbleLarge;
   final int? rumbleSmall;
+
+  /// PONG: the id of the PING that is being answered.
+  final int? pingId;
   ParsedReply({
     required this.type,
     this.hostName,
     this.helloOk,
     this.rumbleLarge,
     this.rumbleSmall,
+    this.pingId,
   });
 }
 
@@ -129,12 +144,18 @@ ParsedReply? parseReply(Uint8List data) {
     if (data.length < 3) return null;
     final nameLen = data[2];
     if (data.length < 3 + nameLen) return null;
-    final name = utf8.decode(data.sublist(3, 3 + nameLen));
+    // A damaged packet must never throw inside the socket's event handler.
+    final name = utf8.decode(data.sublist(3, 3 + nameLen), allowMalformed: true);
     return ParsedReply(type: type, hostName: name);
   }
   if (type == Protocol.typeRumble) {
     if (data.length < 4) return null;
     return ParsedReply(type: type, rumbleLarge: data[2], rumbleSmall: data[3]);
+  }
+  if (type == Protocol.typePong) {
+    if (data.length < 6) return null;
+    final id = data[2] | (data[3] << 8) | (data[4] << 16) | (data[5] << 24);
+    return ParsedReply(type: type, pingId: id);
   }
   if (type == Protocol.typeHelloAck) {
     if (data.length < 3) return null;

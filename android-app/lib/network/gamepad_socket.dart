@@ -24,11 +24,36 @@ class GamepadSocket {
   bool _sweeping = false;
   DateTime _lastSent = DateTime.fromMillisecondsSinceEpoch(0);
 
+  // ── liveness / latency (PING / PONG) ──
+  static const _pingEveryMs = 1000;
+  static const _lossAfterMs = 3000; // no PONG for this long => reconnecting
+  static const _giveUpAfterMs = 30000; // reconnecting this long => back to menu
+  final Stopwatch _clock = Stopwatch()..start();
+  Timer? _pingTimer;
+  bool _pongSeen = false; // old PC apps never answer, so only trust PONGs after one arrives
+  int _lastPongMs = 0;
+  int _reconnectSinceMs = 0;
+  bool _rebinding = false;
+
+  /// Smoothed round-trip time to the PC in ms (null until the first PONG).
+  int? pingMs;
+
+  /// True while the PC stopped answering and the app keeps trying to reach it.
+  bool reconnecting = false;
+
   final _statusController = StreamController<ConnectionStatus>.broadcast();
   final _discoveredController = StreamController<DiscoveredHost>.broadcast();
   final _connectionController = StreamController<bool>.broadcast();
   final _activeAppController = StreamController<String>.broadcast();
   final _rumbleController = StreamController<List<int>>.broadcast();
+  final _pingController = StreamController<int>.broadcast();
+  final _reconnectController = StreamController<bool>.broadcast();
+
+  /// Round-trip time to the PC in ms, about once a second while connected.
+  Stream<int> get pingStream => _pingController.stream;
+
+  /// true when the link to the PC dropped and the app is trying to restore it.
+  Stream<bool> get reconnectingStream => _reconnectController.stream;
 
   Stream<ConnectionStatus> get statusStream => _statusController.stream;
   Stream<DiscoveredHost> get discoveredStream => _discoveredController.stream;
@@ -124,8 +149,16 @@ class GamepadSocket {
 
   void _onEvent(RawSocketEvent event) {
     if (event != RawSocketEvent.read) return;
-    final datagram = _socket?.receive();
-    if (datagram == null) return;
+    // Several datagrams can be waiting at once (e.g. a burst of discovery
+    // replies), so drain them all instead of handling just one per event.
+    for (var i = 0; i < 64; i++) {
+      final datagram = _socket?.receive();
+      if (datagram == null) return;
+      _handleDatagram(datagram);
+    }
+  }
+
+  void _handleDatagram(Datagram datagram) {
     final reply = parseReply(datagram.data);
     if (reply == null) return;
 
@@ -141,6 +174,12 @@ class GamepadSocket {
       if (status == ConnectionStatus.connected &&
           datagram.address.address == _pcAddress?.address) {
         _rumbleController.add([reply.rumbleLarge ?? 0, reply.rumbleSmall ?? 0]);
+      }
+    } else if (reply.type == Protocol.typePong) {
+      if (status == ConnectionStatus.connected &&
+          reply.pingId != null &&
+          datagram.address.address == _pcAddress?.address) {
+        _onPong(reply.pingId!);
       }
     } else if (reply.type == Protocol.typeHelloAck) {
       // HELLO is retried, so duplicate ACKs are normal: only the first counts.
@@ -160,8 +199,99 @@ class GamepadSocket {
   void _setStatus(ConnectionStatus s) {
     if (status == s) return;
     status = s;
+    if (s == ConnectionStatus.connected) {
+      _startPing();
+    } else {
+      _stopPing();
+    }
     _statusController.add(s);
     _connectionController.add(s == ConnectionStatus.connected);
+  }
+
+  // ───────────────────────── latency & auto-reconnect ─────────────────────────
+
+  void _startPing() {
+    _pingTimer?.cancel();
+    _pongSeen = false;
+    _lastPongMs = _clock.elapsedMilliseconds;
+    pingMs = null;
+    _setReconnecting(false);
+    _pingTimer = Timer.periodic(
+        const Duration(milliseconds: _pingEveryMs), (_) => _pingTick());
+  }
+
+  void _stopPing() {
+    _pingTimer?.cancel();
+    _pingTimer = null;
+    _pongSeen = false;
+    pingMs = null;
+    _setReconnecting(false);
+  }
+
+  void _setReconnecting(bool v) {
+    if (reconnecting == v) return;
+    reconnecting = v;
+    if (!_reconnectController.isClosed) _reconnectController.add(v);
+  }
+
+  void _onPong(int id) {
+    final now = _clock.elapsedMilliseconds;
+    final rtt = (now - id) & 0xFFFFFFFF;
+    if (rtt > 10000) return; // stale or bogus
+    _pongSeen = true;
+    _lastPongMs = now;
+    final prev = pingMs;
+    final smoothed = prev == null ? rtt : (prev * 0.7 + rtt * 0.3).round();
+    pingMs = smoothed;
+    if (!_pingController.isClosed) _pingController.add(smoothed);
+    _setReconnecting(false);
+  }
+
+  void _pingTick() {
+    if (status != ConnectionStatus.connected) return;
+    final addr = _pcAddress;
+    final sock = _socket;
+    if (addr == null || sock == null) return;
+    final now = _clock.elapsedMilliseconds;
+
+    if (_pongSeen && now - _lastPongMs > _lossAfterMs) {
+      if (!reconnecting) {
+        _reconnectSinceMs = now;
+        _setReconnecting(true);
+      }
+      if (now - _reconnectSinceMs > _giveUpAfterMs) {
+        disconnect(); // the gamepad screen then returns to the menu
+        return;
+      }
+      // The PC may have restarted or the Wi-Fi changed: introduce ourselves
+      // again and, if our own address changed, move to the new network.
+      try {
+        sock.send(PacketBuilder.hello(_deviceName), addr, Protocol.port);
+      } catch (_) {}
+      _rebindIfNetworkChanged();
+    }
+
+    try {
+      _socket?.send(PacketBuilder.ping(now & 0xFFFFFFFF), addr, Protocol.port);
+    } catch (_) {}
+  }
+
+  Future<void> _rebindIfNetworkChanged() async {
+    if (_rebinding) return;
+    _rebinding = true;
+    try {
+      final cands = await _candidates();
+      final best = cands.isEmpty ? null : cands.first.address;
+      // A socket bound to "any" address works on every network already.
+      if (best == null || _boundAddress == null || best == _boundAddress) return;
+      _socket?.close();
+      _socket = null;
+      await _bind(best);
+    } catch (_) {
+      // Try again on the next tick.
+    } finally {
+      _rebinding = false;
+    }
   }
 
   // ───────────────────────── discovery ─────────────────────────
@@ -324,8 +454,12 @@ class GamepadSocket {
       rt: rt,
       sequence: _sequence++,
     );
-    _socket!.send(packet, _pcAddress!, Protocol.port);
-    _lastSent = DateTime.now();
+    try {
+      _socket!.send(packet, _pcAddress!, Protocol.port);
+      _lastSent = DateTime.now();
+    } catch (_) {
+      // Network briefly unreachable (e.g. Wi-Fi switching); the next frame retries.
+    }
   }
 
   void disconnect() {
@@ -343,6 +477,9 @@ class GamepadSocket {
   void dispose() {
     _helloTimer?.cancel();
     _heartbeatTimer?.cancel();
+    _pingTimer?.cancel();
+    _pingController.close();
+    _reconnectController.close();
     _socket?.close();
     _statusController.close();
     _discoveredController.close();

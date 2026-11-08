@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
@@ -29,6 +31,18 @@ class TriggerWidget extends StatefulWidget {
   final bool aimEnabled;
   final double aimFireK;
 
+  /// Rapid fire for aim & fire: while the pull is held past the fire distance
+  /// the trigger is pulsed on/off ~12 times a second instead of staying
+  /// pressed (for semi-automatic weapons that need a fresh press per shot).
+  final bool turbo;
+
+  /// Half of one turbo press/release cycle in ms (40 = ~12 presses/s).
+  final int turboHalfMs;
+
+  /// Receives the automatic on/off pulses of turbo, so the owner can skip
+  /// per-press feedback such as haptics. Falls back to [onChanged].
+  final void Function(double value)? onPulse;
+
   /// [active] is false when the finger lifts.
   final void Function(double x, double y, bool active)? onSteer;
 
@@ -44,6 +58,9 @@ class TriggerWidget extends StatefulWidget {
     this.steerEnabled = false,
     this.aimEnabled = false,
     this.aimFireK = 1.8,
+    this.turbo = false,
+    this.turboHalfMs = 40,
+    this.onPulse,
     this.onSteer,
   });
 
@@ -55,6 +72,8 @@ class _TriggerWidgetState extends State<TriggerWidget> {
   static const _doubleTapWindow = Duration(milliseconds: 350);
   static const _maxTapDuration = Duration(milliseconds: 250);
   static const _maxTapTravel = 24.0;
+  Timer? _turboTimer;
+  bool _turboOut = false; // what turbo is currently sending
 
   double _value = 0;
   bool _latched = false;
@@ -77,6 +96,21 @@ class _TriggerWidgetState extends State<TriggerWidget> {
     if (_value == v) return;
     setState(() => _value = v);
     widget.onChanged(v);
+  }
+
+  void _startTurbo() {
+    _turboTimer?.cancel();
+    _turboOut = true; // _set(1.0) has just sent the first press
+    _turboTimer = Timer.periodic(Duration(milliseconds: widget.turboHalfMs), (_) {
+      _turboOut = !_turboOut;
+      (widget.onPulse ?? widget.onChanged)(_turboOut ? 1.0 : 0.0);
+    });
+  }
+
+  void _stopTurbo() {
+    _turboTimer?.cancel();
+    _turboTimer = null;
+    _turboOut = false;
   }
 
   void _setLatched(bool v) {
@@ -107,9 +141,13 @@ class _TriggerWidgetState extends State<TriggerWidget> {
       final fireDist = r * widget.aimFireK;
       if (!_firing && raw.distance >= fireDist) {
         _firing = true;
-        if (!_latched) _set(1.0);
+        if (!_latched) {
+          _set(1.0);
+          if (widget.turbo) _startTurbo();
+        }
       } else if (_firing && raw.distance < fireDist * 0.85) {
         _firing = false;
+        _stopTurbo();
         if (!_latched) _set(0.0);
       }
     }
@@ -118,6 +156,7 @@ class _TriggerWidgetState extends State<TriggerWidget> {
   void _down(PointerDownEvent e) {
     if (_pointer != null) return;
     _pointer = e.pointer;
+    _stopTurbo();
     final now = DateTime.now();
     _downAt = now;
     _downPos = e.localPosition;
@@ -168,6 +207,7 @@ class _TriggerWidgetState extends State<TriggerWidget> {
       if (_dot != Offset.zero) setState(() => _dot = Offset.zero);
     }
     _firing = false;
+    _stopTurbo();
     final down = _downAt;
     final wasShortTap = e is PointerUpEvent &&
         !_movedFar &&
@@ -179,8 +219,19 @@ class _TriggerWidgetState extends State<TriggerWidget> {
   }
 
   @override
+  void dispose() {
+    _turboTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
   void didUpdateWidget(covariant TriggerWidget old) {
     super.didUpdateWidget(old);
+    if (!widget.turbo && _turboTimer != null) {
+      // Turbo switched off mid-pull: go back to a plain held press.
+      _stopTurbo();
+      if (_firing && !_latched) widget.onChanged(1.0);
+    }
     if (!widget.latchEnabled && _latched) {
       // Latch feature switched off while locked: let go.
       WidgetsBinding.instance.addPostFrameCallback((_) {

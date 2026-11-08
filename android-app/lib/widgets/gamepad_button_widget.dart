@@ -20,6 +20,9 @@ class GamepadButtonWidget extends StatefulWidget {
   /// Rapid fire: while held, the button is pressed and released repeatedly.
   final bool turbo;
 
+  /// Half of one turbo press/release cycle in ms (40 = ~12 presses/s).
+  final int turboHalfMs;
+
   /// Receives the automatic press/release pulses of turbo mode (so the owner
   /// can skip vibration on each pulse). Falls back to [onChanged].
   final void Function(bool pressed)? onPulse;
@@ -35,6 +38,7 @@ class GamepadButtonWidget extends StatefulWidget {
     this.icon,
     this.toggle = false,
     this.turbo = false,
+    this.turboHalfMs = 40,
     this.onPulse,
   });
 
@@ -43,8 +47,6 @@ class GamepadButtonWidget extends StatefulWidget {
 }
 
 class _GamepadButtonWidgetState extends State<GamepadButtonWidget> {
-  static const _turboHalfPeriod = Duration(milliseconds: 40); // ~12 presses/s
-
   bool _pressed = false; // what the finger / toggle says
   bool _out = false; // what is actually sent (differs from _pressed in turbo)
   Timer? _turboTimer;
@@ -57,7 +59,7 @@ class _GamepadButtonWidgetState extends State<GamepadButtonWidget> {
       widget.onChanged(true);
       if (widget.turbo) {
         _turboTimer?.cancel();
-        _turboTimer = Timer.periodic(_turboHalfPeriod, (_) {
+        _turboTimer = Timer.periodic(Duration(milliseconds: widget.turboHalfMs), (_) {
           _out = !_out;
           (widget.onPulse ?? widget.onChanged)(_out);
         });

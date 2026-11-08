@@ -25,6 +25,8 @@ Packets with the wrong magic byte are silently dropped.
 | 7    | GOODBYE           | phone -> PC     |
 | 8    | ACTIVE_APP        | PC -> phone     |
 | 9    | RUMBLE            | PC -> phone     |
+| 10   | PING              | phone -> PC     |
+| 11   | PONG              | PC -> phone     |
 
 ### INPUT (type 1) — 18 bytes total
 
@@ -106,6 +108,20 @@ Sent by the PC when a game sets rumble on the virtual Xbox 360 controller, and
 re-sent every ~150 ms while either motor is non-zero (UDP can drop packets).
 `0, 0` means stop. The phone also stops by itself if no RUMBLE packet arrives
 for ~450 ms. Older apps ignore this packet.
+
+### PING (type 10) / PONG (type 11) — 6 bytes each
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 2      | 4    | id (uint32, chosen by the phone, e.g. its millisecond clock) |
+
+The phone sends a PING about once a second while connected; the PC answers
+immediately with a PONG carrying the same 4 bytes, and also counts the PING as
+a sign of life. The phone uses the round trip for the latency indicator, and
+if PONGs that used to arrive stop for ~3 s it shows "Reconnecting", keeps
+re-sending HELLO, and returns to the menu after ~30 s without an answer.
+Older PC apps ignore PING; the phone only starts watching for PONGs after it
+has received the first one, so it never reconnects needlessly against them.
 
 ### DISCOVER (type 4)
 

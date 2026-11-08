@@ -192,3 +192,9 @@ Created with ❤️ by [kaifcoding](https://github.com/kaifcoding) · © 2026 At
 - **New controls** — glossy A/B/X/Y spheres, capsule bumpers (LB/RB), a cross-shaped D-pad whose arms light up, sticks with a guide ring and a glowing knob, and triggers with a pressure gauge.
 - **Re-tuned default layout** — triggers + bumpers in a top row, D-pad and left stick under the left thumb, right stick and A/B/X/Y under the right thumb, and the system buttons grouped in the middle. Existing saved layouts are kept; *Reset* in the editor applies the new defaults.
 
+
+## Latency, auto-reconnect and turbo speed
+
+- **Ping indicator** — a small badge at the top centre of the gamepad screen shows the round-trip time to the PC (green < 40 ms, amber < 90 ms, red above). Needs the updated PC app (new packet types 10/11, see `PROTOCOL.md`).
+- **Auto-reconnect** — if the PC stops answering for ~3 s the badge shows *Reconnecting…*, the phone keeps re-introducing itself (and follows a Wi-Fi address change), and everything is released so nothing stays held. It returns to the menu after ~30 s. The PC now remembers each phone's name, so a phone that was dropped and comes back is no longer listed as "Unknown device".
+- **Turbo speed** — editor → tap empty space → *General* → *Turbo speed* (4–20 presses per second). It applies to rapid-fire buttons and to the *Turbo* option of the Aim & fire triggers (editor → tap LT/RT → *Aim & fire* → *Turbo (rapid fire)*).

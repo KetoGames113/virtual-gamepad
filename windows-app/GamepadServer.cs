@@ -25,6 +25,10 @@ public sealed class GamepadServer : IDisposable
     private readonly ViGEmClient _viGem;
     private readonly UdpClient _socket;
     private readonly Dictionary<IPEndPoint, ClientSession> _clients = new();
+
+    // Last name each phone used, so a phone that was dropped (timeout) and
+    // then resumes streaming keeps its name instead of "Unknown device".
+    private readonly Dictionary<IPEndPoint, string> _knownNames = new();
     private readonly string _hostName = Environment.MachineName;
     private CancellationTokenSource? _cts;
     private string _lastApp = ""; // last foreground app that wasn't this host
@@ -129,6 +133,10 @@ public sealed class GamepadServer : IDisposable
                 Touch(sender);
                 break;
 
+            case Protocol.TypePing:
+                HandlePing(data, sender);
+                break;
+
             case Protocol.TypeGoodbye:
                 RemoveClient(sender, "disconnected");
                 break;
@@ -157,6 +165,8 @@ public sealed class GamepadServer : IDisposable
         }
 
         deviceName = UniqueName(deviceName, sender);
+        if (_knownNames.Count > 64) _knownNames.Clear();
+        _knownNames[sender] = deviceName;
 
         bool ok = true;
         if (!_clients.TryGetValue(sender, out var session))
@@ -214,7 +224,7 @@ public sealed class GamepadServer : IDisposable
             // Client is streaming input without having completed HELLO
             // (e.g. our ACK was lost) - treat this first INPUT as an
             // implicit HELLO so the experience is still seamless.
-            HandleHello(new byte[] { Protocol.Magic, Protocol.TypeHello }, sender);
+            HandleHello(ImplicitHello(sender), sender);
             if (!_clients.TryGetValue(sender, out session)) return;
         }
 
@@ -241,6 +251,36 @@ public sealed class GamepadServer : IDisposable
 
         XInputMapper.Apply(session.Controller, state);
         session.LastSeenUtc = DateTime.UtcNow;
+    }
+
+    /// A HELLO for a phone that streams input without having said hello
+    /// (it was dropped by the timeout): reuse the name it had before.
+    private byte[] ImplicitHello(IPEndPoint sender)
+    {
+        if (!_knownNames.TryGetValue(sender, out var known))
+            return new byte[] { Protocol.Magic, Protocol.TypeHello };
+
+        var nameBytes = Encoding.UTF8.GetBytes(known);
+        var packet = new byte[3 + nameBytes.Length];
+        packet[0] = Protocol.Magic;
+        packet[1] = Protocol.TypeHello;
+        packet[2] = (byte)nameBytes.Length;
+        Array.Copy(nameBytes, 0, packet, 3, nameBytes.Length);
+        return packet;
+    }
+
+    /// Latency probe: echo the 4-byte id back so the phone can measure the
+    /// round trip, and count it as a sign of life.
+    private void HandlePing(byte[] data, IPEndPoint sender)
+    {
+        if (data.Length < 6) return;
+        Touch(sender);
+
+        var pong = new byte[6];
+        pong[0] = Protocol.Magic;
+        pong[1] = Protocol.TypePong;
+        Array.Copy(data, 2, pong, 2, 4);
+        try { _socket.Send(pong, pong.Length, sender); } catch { /* phone gone */ }
     }
 
     private void Touch(IPEndPoint sender)
